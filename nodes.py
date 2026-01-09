@@ -39,12 +39,8 @@ class NanoBananaTextToImage:
                 ], {
                     "default": "1:1"
                 }),
-                "batch_size": ("INT", {
-                    "default": 1,
-                    "min": 1,
-                    "max": 100,
-                    "step": 1,
-                    "display": "number"
+                "image_size": (["1K", "2K", "4K"], {
+                    "default": "2K"
                 }),
             },
             "optional": {
@@ -54,9 +50,6 @@ class NanoBananaTextToImage:
                     "max": 2147483647,
                     "display": "number"
                 }),
-                "image_size": (["1K", "2K", "4K"], {
-                    "default": "2K"
-                }),
             }
         }
     
@@ -65,7 +58,7 @@ class NanoBananaTextToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, prompt, api_key, model, aspect_ratio, batch_size=1, seed=-1, image_size="2K"):
+    def generate_image(self, prompt, api_key, model, aspect_ratio, image_size="2K", seed=-1):
         """
         Generate image from text prompt
         """
@@ -83,54 +76,36 @@ class NanoBananaTextToImage:
             print(f"提示词    {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
             print(f"模型      {model}")
             print(f"宽高比    {aspect_ratio}")
-            print(f"批量数量  {batch_size}")
             print(f"清晰度    {image_size}")
             print(f"{'='*60}\n")
             
             logger.debug(f"Full params - Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}")
             
-            # Only use image_size for nano-banana-pro-svip
-            size_param = image_size if model == "nano-banana-pro-svip" else None
+            # 状态1: 正在生图（开始）
+            print(f"📝 正在生图")
             
-            # Process seed (-1 means random)
-            seed_param = None if seed < 0 else seed
+            # 状态2: 等待API返回（调用API前）
+            print(f"⏳ 耐心等待，好饭不怕晚...")
             
-            # 批量生成图片
-            batch_images = []
-            pbar = ProgressBar(batch_size)  # 创建进度条
-            for i in range(batch_size):
-                if batch_size > 1:
-                    print(f"生成中 ({i+1}/{batch_size})...")
-                
-                # Call API
-                response_data = call_nano_banana_api(
-                    prompt=prompt,
-                    model=model,
-                    aspect_ratio=aspect_ratio,
-                    image_size=size_param,
-                    seed=seed_param,
-                    api_key=api_key
-                )
+            # 调用API（不输出给用户）
+            response_data = call_nano_banana_api(
+                prompt=prompt,
+                model=model,
+                aspect_ratio=aspect_ratio,
+                image_size=size_param,
+                seed=seed_param,
+                api_key=api_key
+            )
 
-                # Process response
-                pil_image = process_api_response(response_data)
+            # API返回200后，处理图片
+            pil_image = process_api_response(response_data)
+            comfy_image = pil_to_comfy_image(pil_image)
+            
+            # 状态3: 完成
+            print(f"✅ 完成：出图啦！")
+            print(f"\n🎉 大功告成! 您的艺术品已准备就绪!\n")
 
-                # Convert to ComfyUI format
-                comfy_image = pil_to_comfy_image(pil_image)
-                
-                batch_images.append(comfy_image)
-                pbar.update(1)
-
-            # 合并所有图片为一个 batch
-            if len(batch_images) == 1:
-                result = batch_images[0]
-                print(f"\n完成!\n")
-            else:
-                import torch
-                result = torch.cat(batch_images, dim=0)
-                print(f"\n完成! 共生成 {batch_size} 张图片\n")
-
-            return (result,)
+            return (comfy_image,)
             
         except Exception as e:
             error_msg = f"文生图失败: {str(e)}"
@@ -173,23 +148,21 @@ class NanoBananaImageToImage:
                 ], {
                     "default": "1:1"
                 }),
-                "batch_size": ("INT", {
-                    "default": 1,
-                    "min": 1,
-                    "max": 100,
-                    "step": 1,
-                    "display": "number"
+                "image_size": (["1K", "2K", "4K"], {
+                    "default": "2K"
                 }),
             },
             "optional": {
+                "reference_2": ("IMAGE",),
+                "reference_3": ("IMAGE",),
+                "reference_4": ("IMAGE",),
+                "reference_5": ("IMAGE",),
+                "reference_6": ("IMAGE",),
                 "seed": ("INT", {
                     "default": -1,
                     "min": -1,
                     "max": 2147483647,
                     "display": "number"
-                }),
-                "image_size": (["1K", "2K", "4K"], {
-                    "default": "2K"
                 }),
             }
         }
@@ -199,7 +172,7 @@ class NanoBananaImageToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, image, prompt, api_key, model, aspect_ratio, batch_size=1, seed=-1, image_size="2K"):
+    def generate_image(self, image, prompt, api_key, model, aspect_ratio, image_size="2K", reference_2=None, reference_3=None, reference_4=None, reference_5=None, reference_6=None, seed=-1):
         """
         Generate image from reference image and text prompt
         """
@@ -210,6 +183,21 @@ class NanoBananaImageToImage:
 
             # Process seed (-1 means random)
             seed_param = None if seed < 0 else seed
+            
+            # 收集所有参考图
+            reference_images = [image]
+            if reference_2 is not None:
+                reference_images.append(reference_2)
+            if reference_3 is not None:
+                reference_images.append(reference_3)
+            if reference_4 is not None:
+                reference_images.append(reference_4)
+            if reference_5 is not None:
+                reference_images.append(reference_5)
+            if reference_6 is not None:
+                reference_images.append(reference_6)
+            
+            num_references = len(reference_images)
 
             print(f"\n{'='*60}")
             print(f"Nano Banana 图生图")
@@ -217,57 +205,45 @@ class NanoBananaImageToImage:
             print(f"提示词    {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
             print(f"模型      {model}")
             print(f"宽高比    {aspect_ratio}")
-            print(f"批量数量  {batch_size}")
             print(f"清晰度    {image_size}")
-            print(f"参考图    {image.shape[2]}x{image.shape[1]}")
-            if batch_size > 1:
-                print(f"批次      {batch_size} 张")
+            print(f"参考图    {num_references} 张")
+            for idx, ref_img in enumerate(reference_images, 1):
+                print(f"  - 参考图{idx}: {ref_img.shape[2]}x{ref_img.shape[1]}")
             print(f"{'='*60}\n")
             
-            logger.debug(f"Reference image shape: {image.shape}")
+            logger.debug(f"Total reference images: {num_references}")
             
-            # Convert reference image to base64
-            reference_base64 = comfy_image_to_base64(image)
+            # Convert all reference images to base64
+            reference_base64_list = []
+            for ref_img in reference_images:
+                reference_base64_list.append(comfy_image_to_base64(ref_img))
             
-            # Only use image_size for nano-banana-pro-svip
-            seed_param = None if seed < 0 else seed
+            # 状态1: 正在转换（开始）
+            print(f"📝 正在转换")
             
-            # 批量生成图片
-            batch_images = []
-            for i in range(batch_size):
-                if batch_size > 1:
-                    print(f"生成中 ({i+1}/{batch_size})...")
-                
-                # Call API
-                response_data = call_nano_banana_api(
-                    prompt=prompt,
-                    model=model,
-                    aspect_ratio=aspect_ratio,
-                    image_size=size_param,
-                    seed=seed_param,
-                    api_key=api_key,
-                    reference_image_base64=reference_base64
-                )
+            # 状态2: 等待API返回（调用API前）
+            print(f"⏳ 耐心等待，好饭不怕晚...")
+            
+            # 调用API（不输出给用户）
+            response_data = call_nano_banana_api(
+                prompt=prompt,
+                model=model,
+                aspect_ratio=aspect_ratio,
+                image_size=size_param,
+                seed=seed_param,
+                api_key=api_key,
+                reference_images_base64=reference_base64_list
+            )
 
-                # Process response
-                pil_image = process_api_response(response_data)
+            # API返回200后，处理图片
+            pil_image = process_api_response(response_data)
+            comfy_image = pil_to_comfy_image(pil_image)
+            
+            # 状态3: 完成
+            print(f"✅ 完成：改造完成！")
+            print(f"\n🎉 图生图完成! 您的作品华丽变身!\n")
 
-                # Convert to ComfyUI format
-                comfy_image = pil_to_comfy_image(pil_image)
-                
-                batch_images.append(comfy_image)
-                pbar.update(1)
-
-            # 合并所有图片为一个 batch
-            if len(batch_images) == 1:
-                result = batch_images[0]
-                print(f"\n完成!\n")
-            else:
-                import torch
-                result = torch.cat(batch_images, dim=0)
-                print(f"\n完成! 共生成 {batch_size} 张图片\n")
-
-            return (result,)
+            return (comfy_image,)
             
         except Exception as e:
             error_msg = f"图生图失败: {str(e)}"
@@ -291,8 +267,8 @@ NODE_CLASS_MAPPINGS = {
 
 # Node display names in ComfyUI interface
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "NanoBananaTextToImage": "Nano Banana Text-to-Image",
-    "NanoBananaImageToImage": "Nano Banana Image-to-Image",
+    "NanoBananaTextToImage": "Nano Banana 文生图",
+    "NanoBananaImageToImage": "Nano Banana 图生图",
 }
 
 

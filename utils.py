@@ -43,7 +43,7 @@ def call_nano_banana_api(
     image_size=None,
     seed=None,
     api_key=None,
-    reference_image_base64=None,
+    reference_images_base64=None,  # 支持多个参考图（列表）
     max_retries=3
 ):
     """
@@ -52,14 +52,11 @@ def call_nano_banana_api(
     Args:
         prompt (str): The text prompt for image generation
         model (str): Model to use (nano-banana-svip or nano-banana-pro-svip)
-                     These are New API platform wrapper names that map to:
-                     - nano-banana-svip -> gemini-2.5-flash-image
-                     - nano-banana-pro-svip -> gemini-3-pro-image-preview
         aspect_ratio (str): Aspect ratio for the generated image (1:1, 16:9, etc.)
         image_size (str): Image size (1K, 2K, 4K) - only for nano-banana-pro-svip
         seed (int): Random seed for reproducibility (optional)
         api_key (str): API key for authentication
-        reference_image_base64 (str): Base64 encoded reference image for image-to-image
+        reference_images_base64 (list): List of base64 encoded reference images for image-to-image
         max_retries (int): Maximum number of retry attempts
         
     Returns:
@@ -88,14 +85,15 @@ def call_nano_banana_api(
     # Add text prompt
     parts.append({"text": prompt})
     
-    # Add reference image if provided (for image-to-image)
-    if reference_image_base64:
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/png",
-                "data": reference_image_base64
-            }
-        })
+    # Add reference images if provided (for image-to-image)
+    if reference_images_base64:
+        for ref_base64 in reference_images_base64:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": ref_base64
+                }
+            })
     
     # Build generationConfig following official Gemini API format
     # Structure: generationConfig -> imageConfig -> {aspectRatio, imageSize}
@@ -142,10 +140,10 @@ def call_nano_banana_api(
     # Retry logic with exponential backoff
     for attempt in range(max_retries):
         try:
-            # User-friendly progress message
-            mode = "图生图" if reference_image_base64 else "文生图"
-            print(f"正在生成图片... ({mode}, 尝试 {attempt + 1}/{max_retries})")
-            print(f"⏳ 正在调用 API，请稍候...")
+            # 调试日志
+            mode = "图生图" if reference_images_base64 else "文生图"
+            num_refs = len(reference_images_base64) if reference_images_base64 else 0
+            logger.debug(f"正在生成图片... ({mode}, 参考图{num_refs}张, 尝试 {attempt + 1}/{max_retries})")
             logger.debug(f"Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}, Seed: {seed}")
             logger.debug(f"Prompt: {prompt[:100]}...")
             
@@ -157,9 +155,9 @@ def call_nano_banana_api(
             )
             
             # Check if request was successful
-            print(f"📡 API 响应已接收，状态码: {response.status_code}")
+            logger.debug(f"API 响应已接收，状态码: {response.status_code}")
             if response.status_code == 200:
-                print("✅ API 调用成功")
+                logger.debug("API 调用成功")
                 response_json = response.json()
                 
     #                 # === DEBUG: Print response structure ===
@@ -254,12 +252,12 @@ def extract_image_from_gemini_response(response_data):
     """
     try:
         # 🔍 输出完整的 API 返回内容
-        print("\n" + "="*80)
-    #         print("🔍 官方 API 完整返回内容 (JSON 格式)")
-    #         print("="*80)
-    #         import json
-    #         print(json.dumps(response_data, indent=2, ensure_ascii=False))
-    #         print("="*80 + "\n")
+    #   print("\n" + "="*80)
+    #   print("🔍 官方 API 完整返回内容 (JSON 格式)")
+    #   print("="*80)
+    #   import json
+    #   print(json.dumps(response_data, indent=2, ensure_ascii=False))
+    #   print("="*80 + "\n")
     #         
         # Navigate the response structure
         if 'candidates' not in response_data or len(response_data['candidates']) == 0:
