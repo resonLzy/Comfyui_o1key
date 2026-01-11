@@ -10,6 +10,9 @@ import torch
 from PIL import Image
 import time
 import logging
+import os
+import glob
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -101,8 +104,8 @@ def call_nano_banana_api(
         "aspectRatio": aspect_ratio
     }
     
-    # Add imageSize only for nano-banana-pro-svip (gemini-3-pro-image-preview)
-    # Note: We check the display name, not the official API name
+    # Add imageSize only for nano-banana-pro-svip model
+    # Only this model supports image_size parameter (1K, 2K, 4K)
     if image_size and model == "nano-banana-pro-svip":
         image_config["imageSize"] = image_size
     
@@ -429,3 +432,92 @@ def process_api_response(response_data):
         logger.error(f"Failed to process API response: {str(e)}")
         raise
 
+
+def load_images_from_folder(folder_path, file_pattern="*.png,*.jpg,*.jpeg"):
+    """
+    从文件夹加载图片
+    
+    Args:
+        folder_path (str): 文件夹路径
+        file_pattern (str): 文件过滤模式，逗号分隔（如 "*.png,*.jpg,*.jpeg"）
+        
+    Returns:
+        tuple: (PIL Image对象列表, 文件名列表)
+    """
+    if not os.path.exists(folder_path):
+        raise ValueError(f"文件夹不存在: {folder_path}")
+    
+    if not os.path.isdir(folder_path):
+        raise ValueError(f"路径不是文件夹: {folder_path}")
+    
+    # 解析文件模式
+    patterns = [p.strip() for p in file_pattern.split(',')]
+    
+    # 收集所有匹配的文件
+    image_files = []
+    for pattern in patterns:
+        matching_files = glob.glob(os.path.join(folder_path, pattern))
+        image_files.extend(matching_files)
+    
+    # 去重并排序
+    image_files = sorted(set(image_files))
+    
+    if len(image_files) == 0:
+        logger.warning(f"在文件夹 {folder_path} 中未找到匹配 {file_pattern} 的文件")
+        return [], []
+    
+    # 加载图片
+    images = []
+    filenames = []
+    failed_files = []
+    
+    for file_path in image_files:
+        try:
+            img = Image.open(file_path)
+            # 转换为RGB（如果需要）
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            images.append(img)
+            filenames.append(os.path.basename(file_path))
+            logger.debug(f"已加载: {os.path.basename(file_path)}")
+        except Exception as e:
+            failed_files.append(os.path.basename(file_path))
+            logger.error(f"无法加载图片 {os.path.basename(file_path)}: {str(e)}")
+    
+    if failed_files:
+        logger.warning(f"加载失败的文件: {', '.join(failed_files)}")
+    
+    logger.info(f"成功加载 {len(images)}/{len(image_files)} 张图片")
+    
+    return images, filenames
+
+
+def save_image_to_folder(pil_image, output_folder, filename):
+    """
+    保存PIL图片到文件夹
+    
+    Args:
+        pil_image (PIL.Image): PIL图片对象
+        output_folder (str): 输出文件夹路径
+        filename (str): 文件名（保持原文件名）
+        
+    Returns:
+        str: 保存的文件路径
+    """
+    if not output_folder:
+        raise ValueError("输出文件夹路径不能为空")
+    
+    # 创建输出文件夹（如果不存在）
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # 构建完整路径
+    output_path = os.path.join(output_folder, filename)
+    
+    # 保存图片
+    try:
+        pil_image.save(output_path, quality=95)
+        logger.debug(f"已保存: {filename}")
+        return output_path
+    except Exception as e:
+        logger.error(f"保存图片失败 {filename}: {str(e)}")
+        raise
