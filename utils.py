@@ -1,4 +1,4 @@
-﻿"""
+"""
 Utility functions for Gemini Nano Banana API integration
 Uses official Gemini API format for full compatibility
 """
@@ -18,11 +18,82 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def parse_api_error(status_code, error_text):
+    """
+    解析 API 错误，返回用户友好的错误消息
+    
+    Args:
+        status_code (int): HTTP 状态码
+        error_text (str): 原始错误文本
+        
+    Returns:
+        str: 用户友好的错误消息
+    """
+    # 检测是否为 HTML 响应（Cloudflare 等网关错误）
+    is_html = error_text.strip().startswith('<!DOCTYPE') or error_text.strip().startswith('<html')
+    
+    # 常见错误码的友好提示
+    error_messages = {
+        500: "服务器内部错误，请稍后重试",
+        502: "网关错误，服务器暂时不可用",
+        503: "服务暂时不可用，可能正在维护中",
+        504: "网关超时，服务器响应时间过长",
+        520: "服务器返回未知错误",
+        521: "服务器已下线",
+        522: "连接超时",
+        523: "源站不可达",
+        524: "发生超时",
+    }
+    
+    if status_code in error_messages:
+        base_msg = error_messages[status_code]
+        if is_html:
+            return f"⚠️ {base_msg} (错误码: {status_code})"
+        else:
+            # 如果不是 HTML，可以显示部分错误信息
+            short_error = error_text[:100] if len(error_text) > 100 else error_text
+            return f"⚠️ {base_msg}\n   详情: {short_error}"
+    
+    # 其他错误
+    if is_html:
+        return f"⚠️ 服务器错误 (错误码: {status_code})"
+    else:
+        short_error = error_text[:200] if len(error_text) > 200 else error_text
+        return f"⚠️ API 错误 (状态码 {status_code}): {short_error}"
+
 # Model name mapping: UI name -> Official API name
 # This allows user-friendly names in the interface while using official names for API calls
 MODEL_NAME_MAPPING = {
     "nano-banana-svip": "nano-banana-svip",
     "nano-banana-pro-svip": "nano-banana-pro-svip",
+}
+
+# 新模型列表 (使用 OpenAI 格式 API)
+# 这些模型通过 New API 后台映射到实际的 Gemini 3 Pro Image Preview 模型
+OPENAI_FORMAT_MODELS = ["nano-banana-pro-default"]
+
+# 宽高比 -> 1K 分辨率映射表 (来自 Gemini 3 Pro Image 官方文档)
+# 用于 OpenAI 格式 API 的 size 参数
+ASPECT_RATIO_TO_1K_SIZE = {
+    "1:1":  "1024x1024",
+    "2:3":  "848x1264",
+    "3:2":  "1264x848",
+    "3:4":  "896x1200",
+    "4:3":  "1200x896",
+    "4:5":  "928x1152",
+    "5:4":  "1152x928",
+    "9:16": "768x1376",
+    "16:9": "1376x768",
+    "21:9": "1584x672",
+}
+
+# image_size -> 模型后缀映射
+# 根据用户选择的清晰度，选择对应的模型版本
+IMAGE_SIZE_TO_MODEL_SUFFIX = {
+    "1K": "-1K",
+    "2K": "-2K",
+    "4K": "-4K",
 }
 
 
@@ -37,6 +108,273 @@ def get_official_model_name(display_name):
         str: Official API name (e.g., "gemini-3-pro-image-preview")
     """
     return MODEL_NAME_MAPPING.get(display_name, display_name)
+
+
+def is_openai_format_model(model):
+    """
+    检查模型是否使用 OpenAI 格式 API
+    
+    Args:
+        model (str): 模型名称
+        
+    Returns:
+        bool: True 如果使用 OpenAI 格式
+    """
+    return model in OPENAI_FORMAT_MODELS
+
+
+def get_openai_model_and_size(model, aspect_ratio, image_size):
+    """
+    根据用户选择的模型、宽高比和清晰度，获取实际的 OpenAI API 模型名和尺寸
+    
+    Args:
+        model (str): 用户选择的模型 (如 "nano-banana-pro-default")
+        aspect_ratio (str): 宽高比 (如 "16:9")
+        image_size (str): 清晰度 (如 "2K")
+        
+    Returns:
+        tuple: (实际模型名, 1K分辨率尺寸)
+    """
+    # 获取 1K 分辨率尺寸
+    size = ASPECT_RATIO_TO_1K_SIZE.get(aspect_ratio, "1024x1024")
+    
+    # 根据 image_size 选择对应的模型版本
+    suffix = IMAGE_SIZE_TO_MODEL_SUFFIX.get(image_size, "-1K")
+    actual_model = model + suffix
+    
+    return actual_model, size
+
+
+def call_openai_format_api(
+    prompt,
+    model,
+    size,
+    api_key,
+    reference_images_base64=None,
+    max_retries=3
+):
+    """
+    调用 OpenAI 格式的图片生成/编辑 API
+    
+    Args:
+        prompt (str): 提示词
+        model (str): 模型名称 (如 "nano-banana-pro-default-2K")
+        size (str): 图片尺寸 (如 "1376x768")
+        api_key (str): API 密钥
+        reference_images_base64 (list): 参考图的 base64 数据列表（图生图时使用，支持多张）
+        max_retries (int): 最大重试次数
+        
+    Returns:
+        PIL.Image: 生成的图片
+    """
+    if not api_key:
+        raise ValueError("API key is required")
+    
+    base_url = "https://o1key.com"
+    
+    # 根据是否有参考图选择接口
+    if reference_images_base64 and len(reference_images_base64) > 0:
+        # 图生图：使用 /v1/images/edits (multipart/form-data)
+        endpoint = f"{base_url}/v1/images/edits"
+        return _call_openai_image_edit(endpoint, prompt, model, size, api_key, reference_images_base64, max_retries)
+    else:
+        # 文生图：使用 /v1/images/generations (JSON)
+        endpoint = f"{base_url}/v1/images/generations"
+        return _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries)
+
+
+def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries):
+    """
+    调用 OpenAI 格式的文生图 API (/v1/images/generations)
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "response_format": "b64_json",
+    }
+    
+    logger.debug(f"OpenAI API request: {endpoint}, model={model}, size={size}")
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                response_json = response.json()
+                return _parse_openai_response(response_json)
+            else:
+                error_text = response.text
+                friendly_error = parse_api_error(response.status_code, error_text)
+                logger.error(f"API 错误 (状态码 {response.status_code})")
+                
+                # 检测 API 分组不匹配的错误
+                if "model_not_found" in error_text and "无可用渠道" in error_text:
+                    import re
+                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                    group_name = group_match.group(1) if group_match else "default"
+                    
+                    friendly_msg = (
+                        f"❌ API Key 与模型不匹配\n\n"
+                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
+                        f"但您选择的模型「{model}」需要使用其他分组的 API Key。\n\n"
+                        f"💡 解决方法：\n"
+                        f"   • 请确认您的 API Key 分组与所选模型匹配\n"
+                        f"   • 或者更换为对应分组的 API Key"
+                    )
+                    raise Exception(friendly_msg)
+                
+                if 400 <= response.status_code < 500:
+                    if response.status_code == 401:
+                        raise Exception("❌ API 密钥无效或已过期")
+                    elif response.status_code == 429:
+                        raise Exception("❌ 请求过于频繁，请稍后再试")
+                    else:
+                        raise Exception(f"❌ {friendly_error}")
+                
+                # 5xx 服务器错误，重试
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"{friendly_error}")
+                    print(f"⏳ {wait_time}秒后自动重试...")
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
+                    
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error: {str(e)}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"⚠️ 网络错误，{wait_time}秒后重试...")
+                time.sleep(wait_time)
+            else:
+                raise Exception(f"❌ 网络错误: {str(e)}")
+    
+    raise Exception("已达最大重试次数，请求失败")
+
+
+def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base64, max_retries):
+    """
+    调用 OpenAI 格式的图生图 API (/v1/images/edits)
+    使用 multipart/form-data 格式，支持多张参考图
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+    
+    # 构建多图上传的 files 列表
+    # multipart/form-data 支持同名字段传递多个文件
+    files = []
+    for idx, img_base64 in enumerate(images_base64):
+        image_bytes = base64.b64decode(img_base64)
+        files.append(("image", (f"image_{idx}.png", image_bytes, "image/png")))
+    
+    data = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "response_format": "b64_json",
+    }
+    
+    logger.debug(f"OpenAI Edit API request: {endpoint}, model={model}, size={size}, images={len(images_base64)}")
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=180
+            )
+            
+            if response.status_code == 200:
+                response_json = response.json()
+                return _parse_openai_response(response_json)
+            else:
+                error_text = response.text
+                friendly_error = parse_api_error(response.status_code, error_text)
+                logger.error(f"API 错误 (状态码 {response.status_code})")
+                
+                # 检测 API 分组不匹配的错误
+                if "model_not_found" in error_text and "无可用渠道" in error_text:
+                    import re
+                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                    group_name = group_match.group(1) if group_match else "default"
+                    
+                    friendly_msg = (
+                        f"❌ API Key 与模型不匹配\n\n"
+                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
+                        f"但您选择的模型「{model}」需要使用其他分组的 API Key。\n\n"
+                        f"💡 解决方法：\n"
+                        f"   • 请确认您的 API Key 分组与所选模型匹配\n"
+                        f"   • 或者更换为对应分组的 API Key"
+                    )
+                    raise Exception(friendly_msg)
+                
+                if 400 <= response.status_code < 500:
+                    if response.status_code == 401:
+                        raise Exception("❌ API 密钥无效或已过期")
+                    elif response.status_code == 429:
+                        raise Exception("❌ 请求过于频繁，请稍后再试")
+                    else:
+                        raise Exception(f"❌ {friendly_error}")
+                
+                # 5xx 服务器错误，重试
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"{friendly_error}")
+                    print(f"⏳ {wait_time}秒后自动重试...")
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
+                    
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error: {str(e)}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"⚠️ 网络错误，{wait_time}秒后重试...")
+                time.sleep(wait_time)
+            else:
+                raise Exception(f"❌ 网络错误: {str(e)}")
+    
+    raise Exception("已达最大重试次数，请求失败")
+
+
+def _parse_openai_response(response_json):
+    """
+    解析 OpenAI 格式 API 的响应，返回 PIL.Image
+    """
+    try:
+        if "data" not in response_json or len(response_json["data"]) == 0:
+            raise Exception(f"响应中没有图片数据: {list(response_json.keys())}")
+        
+        image_data = response_json["data"][0]
+        
+        if "b64_json" in image_data:
+            base64_str = image_data["b64_json"]
+            return decode_base64_image(base64_str)
+        
+        if "url" in image_data:
+            url = image_data["url"]
+            return download_image_from_url(url)
+        
+        available_keys = list(image_data.keys())
+        raise Exception(f"无法解析图片数据，可用字段: {available_keys}")
+        
+    except Exception as e:
+        logger.error(f"Failed to parse OpenAI response: {str(e)}")
+        raise
 
 
 def call_nano_banana_api(
@@ -64,10 +402,32 @@ def call_nano_banana_api(
         
     Returns:
         dict: API response containing the generated image
+               或 PIL.Image (当使用 OpenAI 格式时)
     """
     if not api_key:
         raise ValueError("API key is required")
     
+    # ========== 路由判断：OpenAI 格式 vs Gemini 格式 ==========
+    if is_openai_format_model(model):
+        # 使用 OpenAI 格式 API
+        actual_model, size = get_openai_model_and_size(model, aspect_ratio, image_size or "1K")
+        logger.debug(f"Using OpenAI format: model={actual_model}, size={size}")
+        
+        # 直接返回 PIL.Image（与 Gemini 格式的返回值不同）
+        pil_image = call_openai_format_api(
+            prompt=prompt,
+            model=actual_model,
+            size=size,
+            api_key=api_key,
+            reference_images_base64=reference_images_base64,  # 支持多张参考图
+            max_retries=max_retries
+        )
+        
+        # 包装成与 Gemini 格式兼容的响应结构
+        # 这样 process_api_response 可以统一处理
+        return {"_openai_pil_image": pil_image}
+    
+    # ========== 原有逻辑：Gemini 格式 API ==========
     # Convert user-friendly model name to official API name
     official_model = get_official_model_name(model)
     logger.debug(f"Model mapping: {model} -> {official_model}")
@@ -184,8 +544,27 @@ def call_nano_banana_api(
     #                 
                 return response_json
             else:
-                error_msg = f"❌ API 错误 (状态码 {response.status_code})\n详情: {response.text[:200]}"
-                logger.error(f"API error: {response.status_code} - {response.text}")
+                # 解析错误响应，检测特定错误类型
+                error_text = response.text
+                friendly_error = parse_api_error(response.status_code, error_text)
+                logger.error(f"API error: {response.status_code}")
+                
+                # 检测 API 分组不匹配的错误（用户使用了错误的 API Key）
+                if "model_not_found" in error_text and "无可用渠道" in error_text:
+                    # 提取分组名称用于提示
+                    import re
+                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                    group_name = group_match.group(1) if group_match else "default"
+                    
+                    friendly_msg = (
+                        f"❌ API Key 与模型不匹配\n\n"
+                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
+                        f"但您选择的模型「{model}」需要使用「svip」分组的 API Key。\n\n"
+                        f"💡 解决方法：\n"
+                        f"   • 如果您要使用 svip 模型，请更换为 svip 专用的 API Key\n"
+                        f"   • 如果您只有 default 分组的 Key，请将模型改为「nano-banana-pro-default」"
+                    )
+                    raise Exception(friendly_msg)
                 
                 # Don't retry for client errors (4xx)
                 if 400 <= response.status_code < 500:
@@ -194,15 +573,16 @@ def call_nano_banana_api(
                     elif response.status_code == 429:
                         raise Exception("❌ 请求过于频繁，请稍后再试")
                     else:
-                        raise Exception(error_msg)
+                        raise Exception(f"❌ {friendly_error}")
                 
                 # Retry for server errors (5xx)
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
-                    print(f"服务器错误，{wait_time}秒后重试...")
+                    print(f"{friendly_error}")
+                    print(f"⏳ {wait_time}秒后自动重试...")
                     time.sleep(wait_time)
                 else:
-                    raise Exception(error_msg)
+                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
                     
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error: {str(e)}")
@@ -327,6 +707,10 @@ def decode_base64_image(base64_string):
     """
     Decode base64 string to PIL Image
     
+    处理常见的 Base64 格式问题：
+    1. 移除 data URI 前缀 (如 "data:image/png;base64,")
+    2. 添加缺失的填充字符 (=)
+    
     Args:
         base64_string (str): Base64 encoded image string
         
@@ -335,6 +719,25 @@ def decode_base64_image(base64_string):
     """
     try:
         logger.debug("Decoding base64 image...")
+        
+        # 1. 移除 data URI 前缀 (如果存在)
+        if base64_string.startswith('data:'):
+            # 格式: data:image/png;base64,xxxxx
+            comma_idx = base64_string.find(',')
+            if comma_idx != -1:
+                base64_string = base64_string[comma_idx + 1:]
+                logger.debug("Removed data URI prefix")
+        
+        # 2. 移除可能的空白字符
+        base64_string = base64_string.strip()
+        
+        # 3. 修复 Base64 填充问题
+        # Base64 字符串长度必须是 4 的倍数，不足的用 '=' 填充
+        padding_needed = len(base64_string) % 4
+        if padding_needed:
+            base64_string += '=' * (4 - padding_needed)
+            logger.debug(f"Added {4 - padding_needed} padding characters")
+        
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
         # print(f"图片解码成功: {image.size[0]}x{image.size[1]}")
@@ -418,19 +821,232 @@ def comfy_image_to_base64(image_tensor):
 
 def process_api_response(response_data):
     """
-    Process Gemini API response and return PIL Image
+    Process API response and return PIL Image
+    
+    支持两种格式:
+    1. Gemini 格式 - 从 candidates/content/parts 中提取图片
+    2. OpenAI 格式 - 直接从包装的 _openai_pil_image 字段获取
     
     Args:
-        response_data (dict): Gemini API response data
+        response_data (dict): API response data
         
     Returns:
         PIL.Image: Generated image
     """
     try:
+        # 检查是否是 OpenAI 格式的包装响应
+        if "_openai_pil_image" in response_data:
+            return response_data["_openai_pil_image"]
+        
+        # 原有逻辑：处理 Gemini 格式
         return extract_image_from_gemini_response(response_data)
     except Exception as e:
         logger.error(f"Failed to process API response: {str(e)}")
         raise
+
+
+# ============================================================
+# 批量请求管理器 - 封装限流和进度管理逻辑
+# ============================================================
+
+class BatchRequestManager:
+    """
+    批量请求管理器
+    
+    负责管理批量 API 请求的限流、进度追踪和自适应调整。
+    设计为独立模块，便于后续优化和扩展。
+    
+    特性：
+    - 请求间隔控制：防止过快请求导致服务器过载
+    - 自适应限流：遇到限流错误时自动增加间隔
+    - 进度追踪：计算预估完成时间
+    - 失败处理：连续失败时自动增加等待时间
+    """
+    
+    def __init__(self, request_interval=2.0, min_interval=0.5, max_interval=30.0):
+        """
+        初始化批量请求管理器
+        
+        Args:
+            request_interval: 基础请求间隔（秒）
+            min_interval: 最小请求间隔（秒）
+            max_interval: 最大请求间隔（秒）
+        """
+        self.base_interval = request_interval
+        self.current_interval = request_interval
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        
+        # 统计数据
+        self.total_count = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.processed_count = 0
+        self.consecutive_failures = 0
+        
+        # 时间追踪
+        self.start_time = None
+        self.processing_times = []  # 记录每次处理耗时，用于更准确的ETA
+    
+    def start(self, total_count):
+        """开始批量处理"""
+        import time
+        self.total_count = total_count
+        self.success_count = 0
+        self.failed_count = 0
+        self.processed_count = 0
+        self.consecutive_failures = 0
+        self.current_interval = self.base_interval
+        self.start_time = time.time()
+        self.processing_times = []
+    
+    def record_success(self, processing_time=None):
+        """记录成功"""
+        self.success_count += 1
+        self.processed_count += 1
+        self.consecutive_failures = 0
+        
+        # 记录处理时间
+        if processing_time:
+            self.processing_times.append(processing_time)
+            # 只保留最近20次的数据，用于计算滑动平均
+            if len(self.processing_times) > 20:
+                self.processing_times.pop(0)
+        
+        # 成功后逐渐恢复正常间隔
+        if self.current_interval > self.base_interval:
+            self.current_interval = max(self.base_interval, self.current_interval * 0.9)
+    
+    def record_failure(self, is_rate_limit=False):
+        """
+        记录失败
+        
+        Args:
+            is_rate_limit: 是否为限流错误
+        """
+        self.failed_count += 1
+        self.processed_count += 1
+        self.consecutive_failures += 1
+        
+        if is_rate_limit:
+            # 限流错误：增加间隔
+            self.current_interval = min(self.current_interval * 1.5, self.max_interval)
+    
+    def get_wait_time(self):
+        """获取下次请求前需要等待的时间"""
+        import time
+        
+        # 基础等待时间
+        wait_time = self.current_interval
+        
+        # 连续失败时额外等待
+        if self.consecutive_failures >= 3:
+            extra_wait = min(self.consecutive_failures * 3, 15)
+            wait_time += extra_wait
+        
+        return wait_time
+    
+    def wait_before_next(self):
+        """在下次请求前等待"""
+        import time
+        if self.processed_count < self.total_count:
+            wait_time = self.get_wait_time()
+            time.sleep(wait_time)
+            return wait_time
+        return 0
+    
+    def get_progress_info(self):
+        """
+        获取进度信息
+        
+        Returns:
+            dict: 包含进度百分比、预估剩余时间等信息
+        """
+        import time
+        
+        progress_pct = (self.processed_count / self.total_count * 100) if self.total_count > 0 else 0
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        
+        # 计算 ETA
+        if self.success_count > 0 and len(self.processing_times) > 0:
+            # 使用滑动平均计算更准确的预估
+            avg_time = sum(self.processing_times) / len(self.processing_times)
+            remaining = self.total_count - self.processed_count
+            eta_seconds = avg_time * remaining
+        elif self.success_count > 0:
+            avg_time = elapsed / self.success_count
+            remaining = self.total_count - self.processed_count
+            eta_seconds = avg_time * remaining
+        else:
+            eta_seconds = None
+        
+        return {
+            "processed": self.processed_count,
+            "total": self.total_count,
+            "success": self.success_count,
+            "failed": self.failed_count,
+            "progress_pct": progress_pct,
+            "elapsed_seconds": elapsed,
+            "eta_seconds": eta_seconds,
+            "current_interval": self.current_interval,
+        }
+    
+    def format_eta(self):
+        """格式化预估剩余时间"""
+        info = self.get_progress_info()
+        eta = info.get("eta_seconds")
+        if eta is None:
+            return "计算中..."
+        return format_time(eta)
+    
+    def get_summary(self):
+        """
+        获取批量处理汇总信息
+        
+        Returns:
+            dict: 汇总统计数据
+        """
+        import time
+        total_time = time.time() - self.start_time if self.start_time else 0
+        avg_time = total_time / max(self.success_count, 1)
+        success_rate = (self.success_count / self.total_count * 100) if self.total_count > 0 else 0
+        
+        return {
+            "total": self.total_count,
+            "success": self.success_count,
+            "failed": self.failed_count,
+            "success_rate": success_rate,
+            "total_time_seconds": total_time,
+            "avg_time_seconds": avg_time,
+        }
+    
+    @staticmethod
+    def is_rate_limit_error(error_str):
+        """检测是否为限流错误"""
+        error_lower = error_str.lower()
+        return (
+            "429" in error_str or 
+            "频繁" in error_str or 
+            "rate" in error_lower or
+            "too many" in error_lower or
+            "limit" in error_lower
+        )
+
+
+def format_time(seconds):
+    """将秒数格式化为可读时间"""
+    if seconds is None:
+        return "未知"
+    if seconds < 60:
+        return f"{int(seconds)}秒"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}分{secs}秒"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}小时{mins}分"
 
 
 def load_images_from_folder(folder_path, file_pattern="*.png,*.jpg,*.jpeg"):

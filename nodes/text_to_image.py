@@ -37,8 +37,12 @@ class NanoBananaTextToImage:
                     "multiline": False,
                     "default": ""
                 }),
-                "model": (["nano-banana-pro-svip", "nano-banana-svip"], {
-                    "default": "nano-banana-pro-svip"
+                "model": ([
+                    "nano-banana-pro-default",
+                    "nano-banana-pro-svip", 
+                    "nano-banana-svip"
+                ], {
+                    "default": "nano-banana-pro-default"
                 }),
                 "aspect_ratio": ([
                     "1:1", "4:3", "3:4", "16:9", "9:16", 

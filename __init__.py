@@ -5,7 +5,7 @@ Nano Banana image generation integration for ComfyUI
 from .nodes import (
     NanoBananaTextToImage,
     NanoBananaImageToImage,
-    NanoBananaBatchProcessor
+    NanoBananaBatchProcessor,
 )
 
 # Node class mappings for ComfyUI
@@ -23,11 +23,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Print initialization message
-print("🍌 Comfyui_o1key plugin loaded successfully!")
+print("🍌 Comfyui_o1key v1.2.0 加载成功!")
 print("   - Nano Banana 文生图")
 print("   - Nano Banana 图生图")
 print("   - Nano Banana 批量处理")
+print("   - 默认模型: nano-banana-pro-default")
 print("   - Powered by o1key.com")

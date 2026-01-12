@@ -1,7 +1,9 @@
 """
 ComfyUI node for batch processing images using Nano Banana API
+使用 BatchRequestManager 进行智能限流
 """
 import logging
+import time
 from comfy.utils import ProgressBar
 
 # Try relative import first (when used as package), fallback to absolute
@@ -12,7 +14,9 @@ try:
         pil_to_comfy_image,
         comfy_image_to_base64,
         load_images_from_folder,
-        save_image_to_folder
+        save_image_to_folder,
+        BatchRequestManager,
+        format_time
     )
 except ImportError:
     from utils import (
@@ -21,7 +25,9 @@ except ImportError:
         pil_to_comfy_image,
         comfy_image_to_base64,
         load_images_from_folder,
-        save_image_to_folder
+        save_image_to_folder,
+        BatchRequestManager,
+        format_time
     )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +36,11 @@ logger = logging.getLogger(__name__)
 class NanoBananaBatchProcessor:
     """
     批量处理节点：从文件夹批量处理图片，支持多提示词
+    
+    特性：
+    - 智能限流：自动控制请求频率，防止服务器过载
+    - 自适应调整：遇到限流错误时自动降速
+    - 进度预估：实时显示预计完成时间
     """
     
     @classmethod
@@ -44,8 +55,12 @@ class NanoBananaBatchProcessor:
                     "multiline": False,
                     "default": ""
                 }),
-                "model": (["nano-banana-pro-svip", "nano-banana-svip"], {
-                    "default": "nano-banana-pro-svip"
+                "model": ([
+                    "nano-banana-pro-default",
+                    "nano-banana-pro-svip", 
+                    "nano-banana-svip"
+                ], {
+                    "default": "nano-banana-pro-default"
                 }),
                 "aspect_ratio": ([
                     "1:1", "4:3", "3:4", "16:9", "9:16", 
@@ -76,6 +91,15 @@ class NanoBananaBatchProcessor:
                     "max": 2147483647,
                     "display": "number"
                 }),
+                "request_interval": ("FLOAT", {
+                    "default": 1.5,
+                    "min": 0.5,
+                    "max": 10.0,
+                    "step": 0.5,
+                    "display": "number",
+                    "tooltip": "每个请求之间的间隔（秒），建议1-3秒"
+                }),
+                # 参考图
                 "image_1": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "image_3": ("IMAGE",),
@@ -93,6 +117,7 @@ class NanoBananaBatchProcessor:
     def process_batch(self, prompt, api_key, model, aspect_ratio, image_size, 
                      folder_path, file_pattern, output_folder,
                      seed=-1,
+                     request_interval=1.5,
                      image_1=None, image_2=None, image_3=None, 
                      image_4=None, image_5=None, image_6=None):
         """
@@ -100,6 +125,7 @@ class NanoBananaBatchProcessor:
         """
         try:
             import random
+            import torch
             
             # 解析提示词（每行一个）
             prompts = [p.strip() for p in prompt.split('\n') if p.strip()]
@@ -111,36 +137,11 @@ class NanoBananaBatchProcessor:
             
             # 收集固定参考图
             fixed_refs = []
-            if image_1 is not None:
-                fixed_refs.append(image_1)
-            if image_2 is not None:
-                fixed_refs.append(image_2)
-            if image_3 is not None:
-                fixed_refs.append(image_3)
-            if image_4 is not None:
-                fixed_refs.append(image_4)
-            if image_5 is not None:
-                fixed_refs.append(image_5)
-            if image_6 is not None:
-                fixed_refs.append(image_6)
+            for img in [image_1, image_2, image_3, image_4, image_5, image_6]:
+                if img is not None:
+                    fixed_refs.append(img)
             
             num_fixed_refs = len(fixed_refs)
-            
-            print(f"\n{'='*60}")
-            print(f"Nano Banana 批量处理")
-            print(f"{'='*60}")
-            print(f"文件夹    {folder_path}")
-            print(f"提示词数  {len(prompts)} 个")
-            for idx, p in enumerate(prompts, 1):
-                print(f"  {idx}. {p[:60]}{'...' if len(p) > 60 else ''}")
-            print(f"模型      {model}")
-            print(f"宽高比    {aspect_ratio}")
-            print(f"清晰度    {image_size}")
-            print(f"固定参考图 {num_fixed_refs} 张")
-            print(f"文件过滤  {file_pattern}")
-            if output_folder:
-                print(f"输出文件夹 {output_folder}")
-            print(f"{'='*60}\n")
             
             # 加载文件夹中的图片
             pil_images, filenames = load_images_from_folder(folder_path, file_pattern)
@@ -152,44 +153,71 @@ class NanoBananaBatchProcessor:
             total_prompts = len(prompts)
             total_generations = total_images * total_prompts
             
-            print(f"📋 找到 {total_images} 张图片")
-            print(f"📋 共 {total_prompts} 个提示词")
-            print(f"📋 总计需要生成 {total_generations} 张图片\n")
+            # 初始化批量请求管理器
+            batch_manager = BatchRequestManager(request_interval=request_interval)
+            batch_manager.start(total_generations)
+            
+            # 预估总时间
+            avg_generation_time = 15  # 假设平均每张15秒
+            estimated_total = total_generations * (avg_generation_time + request_interval)
+            
+            # 打印任务信息
+            print(f"\n{'='*60}")
+            print(f"🍌 Nano Banana 批量处理")
+            print(f"{'='*60}")
+            print(f"📁 文件夹    {folder_path}")
+            print(f"📝 提示词    {len(prompts)} 个")
+            for idx, p in enumerate(prompts, 1):
+                print(f"   {idx}. {p[:50]}{'...' if len(p) > 50 else ''}")
+            print(f"🤖 模型      {model}")
+            print(f"📐 宽高比    {aspect_ratio}")
+            print(f"🖼️  清晰度    {image_size}")
+            if num_fixed_refs > 0:
+                print(f"🖼️  固定参考  {num_fixed_refs} 张")
+            print(f"{'='*60}")
+            print(f"📊 任务: {total_images}张 × {total_prompts}提示词 = {total_generations}个")
+            print(f"⏱️  预计耗时: {format_time(estimated_total)}")
+            print(f"🚦 请求间隔: {request_interval}秒")
+            print(f"{'='*60}\n")
             
             # 批量处理
             all_processed_images = []
-            failed_count = 0
-            success_count = 0
             pbar = ProgressBar(total_generations)
             
             # 外层循环：遍历提示词
             for prompt_idx, current_prompt in enumerate(prompts, 1):
-                print(f"\n{'='*60}")
-                print(f"📝 提示词批次 [{prompt_idx}/{total_prompts}]")
-                print(f"提示词: {current_prompt[:80]}{'...' if len(current_prompt) > 80 else ''}")
-                print(f"{'='*60}\n")
+                if total_prompts > 1:
+                    print(f"\n{'─'*60}")
+                    print(f"📝 提示词 [{prompt_idx}/{total_prompts}]: {current_prompt[:60]}{'...' if len(current_prompt) > 60 else ''}")
+                    print(f"{'─'*60}")
                 
                 # 内层循环：遍历文件夹图片
                 for img_idx, (pil_img, filename) in enumerate(zip(pil_images, filenames), 1):
+                    
+                    # 获取进度信息
+                    progress = batch_manager.get_progress_info()
+                    eta_str = batch_manager.format_eta()
+                    
+                    print(f"\n🔄 [{progress['processed']+1}/{progress['total']}] ({progress['progress_pct']:.0f}%) {filename}")
+                    print(f"   预计剩余: {eta_str}")
+                    
+                    # 记录单次处理开始时间
+                    task_start = time.time()
+                    
                     try:
-                        print(f"📝 [{prompt_idx}/{total_prompts}] [{img_idx}/{total_images}] 处理: {filename}")
-                        print(f"⏳ 使用种子: {current_seed} | 耐心等待...")
-                        
                         # 将当前图片转为ComfyUI格式
                         current_image_tensor = pil_to_comfy_image(pil_img)
                         
-                        # 组合参考图：固定参考图 + 当前图片
+                        # 组合参考图
                         all_refs = fixed_refs + [current_image_tensor]
                         
-                        # 转换所有参考图为base64
-                        ref_base64_list = []
-                        for ref in all_refs:
-                            ref_base64_list.append(comfy_image_to_base64(ref))
+                        # 转换为base64
+                        ref_base64_list = [comfy_image_to_base64(ref) for ref in all_refs]
                         
                         # 处理种子参数
                         seed_param = None if current_seed < 0 else current_seed
                         
-                        # 调用API（image_size会由API函数内部判断是否使用）
+                        # 调用API
                         response_data = call_nano_banana_api(
                             prompt=current_prompt,
                             model=model,
@@ -205,48 +233,63 @@ class NanoBananaBatchProcessor:
                         result_comfy = pil_to_comfy_image(result_pil)
                         all_processed_images.append(result_comfy)
                         
-                        # 保存到输出文件夹（如果指定）
+                        # 保存到输出文件夹
                         if output_folder:
-                            # 添加批次前缀到文件名
-                            prefix = f"prompt{prompt_idx}_"
+                            prefix = f"prompt{prompt_idx}_" if total_prompts > 1 else ""
                             save_filename = prefix + filename
                             save_image_to_folder(result_pil, output_folder, save_filename)
                         
-                        print(f"✅ 完成: {filename}\n")
-                        success_count += 1
+                        # 记录成功
+                        task_time = time.time() - task_start
+                        batch_manager.record_success(processing_time=task_time)
+                        print(f"   ✅ 成功 ({task_time:.1f}秒)")
                         
                     except Exception as e:
-                        failed_count += 1
-                        logger.error(f"处理失败 [{prompt_idx}/{total_prompts}] {filename}: {str(e)}")
-                        print(f"❌ 失败: {filename} - {str(e)}\n")
-                        # 继续处理下一张
+                        error_str = str(e)
+                        is_rate_limit = BatchRequestManager.is_rate_limit_error(error_str)
+                        batch_manager.record_failure(is_rate_limit=is_rate_limit)
+                        
+                        # 显示简短错误
+                        short_error = error_str[:80] if len(error_str) > 80 else error_str
+                        print(f"   ❌ 失败: {short_error}")
+                        
+                        if is_rate_limit:
+                            print(f"   ⚠️ 触发限流，自动降速")
+                        
+                        logger.error(f"处理失败 {filename}: {error_str}")
                     
                     pbar.update(1)
+                    
+                    # 等待下次请求
+                    wait_time = batch_manager.wait_before_next()
+                    if wait_time > 0:
+                        print(f"   ⏳ 等待 {wait_time:.1f}秒")
             
             # 汇总结果
+            summary = batch_manager.get_summary()
+            
             print(f"\n{'='*60}")
             print(f"🎉 批量处理完成!")
-            print(f"提示词数: {total_prompts}")
-            print(f"图片数:   {total_images}")
-            print(f"总生成数: {total_generations}")
-            print(f"成功:     {success_count}/{total_generations}")
-            if failed_count > 0:
-                print(f"失败:     {failed_count}")
+            print(f"{'='*60}")
+            print(f"📊 成功: {summary['success']}/{summary['total']} ({summary['success_rate']:.0f}%)")
+            if summary['failed'] > 0:
+                print(f"   失败: {summary['failed']}")
+            print(f"⏱️  总耗时: {format_time(summary['total_time_seconds'])}")
+            print(f"   平均: {summary['avg_time_seconds']:.1f}秒/张")
             if output_folder:
-                print(f"保存位置: {output_folder}")
+                print(f"💾 保存: {output_folder}")
             print(f"{'='*60}\n")
             
             if len(all_processed_images) == 0:
-                raise Exception("所有图片处理失败")
+                raise Exception("所有图片处理失败，请检查API状态或稍后重试")
             
             # 合并为batch返回
-            import torch
             result_batch = torch.cat(all_processed_images, dim=0)
             
             return (result_batch,)
             
         except Exception as e:
             error_msg = f"批量处理失败: {str(e)}"
-            print(f"\n{error_msg}\n")
+            print(f"\n❌ {error_msg}\n")
             logger.error(error_msg)
             raise Exception(error_msg)

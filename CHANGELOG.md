@@ -5,6 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-01-12
+
+### 新增
+- 新增 `nano-banana-pro-default` 模型选项，现为默认推荐模型
+- 新增 `BatchRequestManager` 批量请求管理器，独立封装限流逻辑
+- 批量处理节点新增 `request_interval` 参数，可调节请求间隔（0.5-10秒）
+- 新增 `parse_api_error()` 函数，统一处理 API 错误
+- 新增 `format_time()` 时间格式化工具函数
+
+### 改进
+- **错误提示优化**：将 HTML 错误响应（如 504 Gateway Timeout）转换为用户友好的中文提示
+- **批量处理优化**：
+  - 智能限流：自动控制请求频率，防止服务器过载
+  - 自适应调整：遇到 429 限流错误时自动增加请求间隔
+  - 进度预估：实时计算并显示预计完成时间（ETA）
+  - 连续失败处理：连续失败 3 次以上自动增加等待时间
+- 调整模型列表顺序：`nano-banana-pro-default` > `nano-banana-pro-svip` > `nano-banana-svip`
+- 简化日志输出，更清晰的进度展示
+
+### 移除
+- 移除测试节点（Gemini3ProImageTest、Gemini3ProSimpleTest、Gemini3ProImageEditTest）
+- 移除批量处理的批次暂停参数（batch_pause_size、batch_pause_time）
+
+### 技术细节
+- 删除 `nodes/gemini3_test.py` 测试文件
+- 新增 `BatchRequestManager` 类到 `utils.py`，封装批量请求的限流、进度追踪和自适应调整逻辑
+- 重构批量处理节点，使用 `BatchRequestManager` 管理请求
+- 统一错误处理：500/502/503/504/520-524 等错误码都有友好提示
+- README 更新：中文优先展示，顶部添加微信联系方式
+
 ## [1.1.0] - 2026-01-10
 
 ### 新增
