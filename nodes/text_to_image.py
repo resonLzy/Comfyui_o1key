@@ -53,6 +53,9 @@ class NanoBananaTextToImage:
                 "image_size": (["1K", "2K", "4K"], {
                     "default": "2K"
                 }),
+                "response_format": (["url", "b64_json"], {
+                    "default": "url"
+                }),
             },
             "optional": {
                 "seed": ("INT", {
@@ -69,7 +72,7 @@ class NanoBananaTextToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, prompt, api_key, model, aspect_ratio, image_size="2K", seed=-1):
+    def generate_image(self, prompt, api_key, model, aspect_ratio, image_size="2K", response_format="url", seed=-1):
         """
         Generate image from text prompt
         """
@@ -84,6 +87,7 @@ class NanoBananaTextToImage:
             print(f"模型      {model}")
             print(f"宽高比    {aspect_ratio}")
             print(f"清晰度    {image_size}")
+            print(f"返回格式  {response_format}")
             print(f"{'='*60}\n")
             
             logger.debug(f"Full params - Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}")
@@ -101,7 +105,8 @@ class NanoBananaTextToImage:
                 aspect_ratio=aspect_ratio,
                 image_size=image_size,
                 seed=seed_param,
-                api_key=api_key
+                api_key=api_key,
+                response_format=response_format
             )
 
             # API返回200后，处理图片

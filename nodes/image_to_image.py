@@ -56,6 +56,9 @@ class NanoBananaImageToImage:
                 "image_size": (["1K", "2K", "4K"], {
                     "default": "2K"
                 }),
+                "response_format": (["url", "b64_json"], {
+                    "default": "url"
+                }),
             },
             "optional": {
                 "image_2": ("IMAGE",),
@@ -77,7 +80,7 @@ class NanoBananaImageToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, image, prompt, api_key, model, aspect_ratio, image_size="2K", image_2=None, image_3=None, image_4=None, image_5=None, image_6=None, seed=-1):
+    def generate_image(self, image, prompt, api_key, model, aspect_ratio, image_size="2K", response_format="url", image_2=None, image_3=None, image_4=None, image_5=None, image_6=None, seed=-1):
         """
         Generate image from reference image and text prompt
         """
@@ -107,6 +110,7 @@ class NanoBananaImageToImage:
             print(f"模型      {model}")
             print(f"宽高比    {aspect_ratio}")
             print(f"清晰度    {image_size}")
+            print(f"返回格式  {response_format}")
             print(f"参考图    {num_references} 张")
             for idx, ref_img in enumerate(reference_images, 1):
                 print(f"  - 参考图{idx}: {ref_img.shape[2]}x{ref_img.shape[1]}")
@@ -133,7 +137,8 @@ class NanoBananaImageToImage:
                 image_size=image_size,
                 seed=seed_param,
                 api_key=api_key,
-                reference_images_base64=reference_base64_list
+                reference_images_base64=reference_base64_list,
+                response_format=response_format
             )
 
             # API返回200后，处理图片

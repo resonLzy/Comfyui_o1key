@@ -1,6 +1,5 @@
 """
 ComfyUI node for batch processing images using Nano Banana API
-使用 BatchRequestManager 进行智能限流
 """
 import logging
 import time
@@ -15,7 +14,6 @@ try:
         comfy_image_to_base64,
         load_images_from_folder,
         save_image_to_folder,
-        BatchRequestManager,
         format_time
     )
 except ImportError:
@@ -26,7 +24,6 @@ except ImportError:
         comfy_image_to_base64,
         load_images_from_folder,
         save_image_to_folder,
-        BatchRequestManager,
         format_time
     )
 
@@ -38,9 +35,9 @@ class NanoBananaBatchProcessor:
     批量处理节点：从文件夹批量处理图片，支持多提示词
     
     特性：
-    - 智能限流：自动控制请求频率，防止服务器过载
-    - 自适应调整：遇到限流错误时自动降速
-    - 进度预估：实时显示预计完成时间
+    - 批量处理：自动遍历文件夹中的图片
+    - 多提示词：支持多行提示词，每行一个
+    - 自动重试：API 内置重试机制，遇到服务器错误会自动重试
     """
     
     @classmethod
@@ -71,6 +68,9 @@ class NanoBananaBatchProcessor:
                 "image_size": (["1K", "2K", "4K"], {
                     "default": "2K"
                 }),
+                "response_format": (["url", "b64_json"], {
+                    "default": "url"
+                }),
                 "folder_path": ("STRING", {
                     "default": "",
                     "multiline": False
@@ -91,14 +91,6 @@ class NanoBananaBatchProcessor:
                     "max": 2147483647,
                     "display": "number"
                 }),
-                "request_interval": ("FLOAT", {
-                    "default": 1.5,
-                    "min": 0.5,
-                    "max": 10.0,
-                    "step": 0.5,
-                    "display": "number",
-                    "tooltip": "每个请求之间的间隔（秒），建议1-3秒"
-                }),
                 # 参考图
                 "image_1": ("IMAGE",),
                 "image_2": ("IMAGE",),
@@ -115,9 +107,8 @@ class NanoBananaBatchProcessor:
     CATEGORY = "o1key/batch"
     
     def process_batch(self, prompt, api_key, model, aspect_ratio, image_size, 
-                     folder_path, file_pattern, output_folder,
+                     response_format, folder_path, file_pattern, output_folder,
                      seed=-1,
-                     request_interval=1.5,
                      image_1=None, image_2=None, image_3=None, 
                      image_4=None, image_5=None, image_6=None):
         """
@@ -153,13 +144,10 @@ class NanoBananaBatchProcessor:
             total_prompts = len(prompts)
             total_generations = total_images * total_prompts
             
-            # 初始化批量请求管理器
-            batch_manager = BatchRequestManager(request_interval=request_interval)
-            batch_manager.start(total_generations)
-            
-            # 预估总时间
-            avg_generation_time = 15  # 假设平均每张15秒
-            estimated_total = total_generations * (avg_generation_time + request_interval)
+            # 统计数据
+            success_count = 0
+            failed_count = 0
+            start_time = time.time()
             
             # 打印任务信息
             print(f"\n{'='*60}")
@@ -172,17 +160,17 @@ class NanoBananaBatchProcessor:
             print(f"🤖 模型      {model}")
             print(f"📐 宽高比    {aspect_ratio}")
             print(f"🖼️  清晰度    {image_size}")
+            print(f"📦 返回格式  {response_format}")
             if num_fixed_refs > 0:
                 print(f"🖼️  固定参考  {num_fixed_refs} 张")
             print(f"{'='*60}")
             print(f"📊 任务: {total_images}张 × {total_prompts}提示词 = {total_generations}个")
-            print(f"⏱️  预计耗时: {format_time(estimated_total)}")
-            print(f"🚦 请求间隔: {request_interval}秒")
             print(f"{'='*60}\n")
             
             # 批量处理
             all_processed_images = []
             pbar = ProgressBar(total_generations)
+            processed_count = 0
             
             # 外层循环：遍历提示词
             for prompt_idx, current_prompt in enumerate(prompts, 1):
@@ -193,13 +181,10 @@ class NanoBananaBatchProcessor:
                 
                 # 内层循环：遍历文件夹图片
                 for img_idx, (pil_img, filename) in enumerate(zip(pil_images, filenames), 1):
+                    processed_count += 1
+                    progress_pct = processed_count / total_generations * 100
                     
-                    # 获取进度信息
-                    progress = batch_manager.get_progress_info()
-                    eta_str = batch_manager.format_eta()
-                    
-                    print(f"\n🔄 [{progress['processed']+1}/{progress['total']}] ({progress['progress_pct']:.0f}%) {filename}")
-                    print(f"   预计剩余: {eta_str}")
+                    print(f"\n🔄 [{processed_count}/{total_generations}] ({progress_pct:.0f}%) {filename}")
                     
                     # 记录单次处理开始时间
                     task_start = time.time()
@@ -225,7 +210,8 @@ class NanoBananaBatchProcessor:
                             image_size=image_size,
                             seed=seed_param,
                             api_key=api_key,
-                            reference_images_base64=ref_base64_list
+                            reference_images_base64=ref_base64_list,
+                            response_format=response_format
                         )
                         
                         # 处理响应
@@ -241,41 +227,38 @@ class NanoBananaBatchProcessor:
                         
                         # 记录成功
                         task_time = time.time() - task_start
-                        batch_manager.record_success(processing_time=task_time)
+                        success_count += 1
                         print(f"   ✅ 成功 ({task_time:.1f}秒)")
                         
                     except Exception as e:
                         error_str = str(e)
-                        is_rate_limit = BatchRequestManager.is_rate_limit_error(error_str)
-                        batch_manager.record_failure(is_rate_limit=is_rate_limit)
+                        failed_count += 1
                         
-                        # 显示简短错误
-                        short_error = error_str[:80] if len(error_str) > 80 else error_str
+                        # 显示错误信息
+                        short_error = error_str[:100] if len(error_str) > 100 else error_str
                         print(f"   ❌ 失败: {short_error}")
                         
-                        if is_rate_limit:
-                            print(f"   ⚠️ 触发限流，自动降速")
+                        # 检测服务器过载，提醒用户
+                        if "429" in error_str or "503" in error_str or "502" in error_str or "频繁" in error_str:
+                            print(f"   ⚠️ 服务器压力较大，API 内置重试机制会自动处理")
                         
                         logger.error(f"处理失败 {filename}: {error_str}")
                     
                     pbar.update(1)
-                    
-                    # 等待下次请求
-                    wait_time = batch_manager.wait_before_next()
-                    if wait_time > 0:
-                        print(f"   ⏳ 等待 {wait_time:.1f}秒")
             
             # 汇总结果
-            summary = batch_manager.get_summary()
+            total_time = time.time() - start_time
+            success_rate = (success_count / total_generations * 100) if total_generations > 0 else 0
+            avg_time = total_time / max(success_count, 1)
             
             print(f"\n{'='*60}")
             print(f"🎉 批量处理完成!")
             print(f"{'='*60}")
-            print(f"📊 成功: {summary['success']}/{summary['total']} ({summary['success_rate']:.0f}%)")
-            if summary['failed'] > 0:
-                print(f"   失败: {summary['failed']}")
-            print(f"⏱️  总耗时: {format_time(summary['total_time_seconds'])}")
-            print(f"   平均: {summary['avg_time_seconds']:.1f}秒/张")
+            print(f"📊 成功: {success_count}/{total_generations} ({success_rate:.0f}%)")
+            if failed_count > 0:
+                print(f"   失败: {failed_count}")
+            print(f"⏱️  总耗时: {format_time(total_time)}")
+            print(f"   平均: {avg_time:.1f}秒/张")
             if output_folder:
                 print(f"💾 保存: {output_folder}")
             print(f"{'='*60}\n")

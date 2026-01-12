@@ -151,7 +151,8 @@ def call_openai_format_api(
     size,
     api_key,
     reference_images_base64=None,
-    max_retries=3
+    max_retries=3,
+    response_format="url"
 ):
     """
     调用 OpenAI 格式的图片生成/编辑 API
@@ -163,6 +164,7 @@ def call_openai_format_api(
         api_key (str): API 密钥
         reference_images_base64 (list): 参考图的 base64 数据列表（图生图时使用，支持多张）
         max_retries (int): 最大重试次数
+        response_format (str): 返回格式 "url" 或 "b64_json"
         
     Returns:
         PIL.Image: 生成的图片
@@ -176,14 +178,14 @@ def call_openai_format_api(
     if reference_images_base64 and len(reference_images_base64) > 0:
         # 图生图：使用 /v1/images/edits (multipart/form-data)
         endpoint = f"{base_url}/v1/images/edits"
-        return _call_openai_image_edit(endpoint, prompt, model, size, api_key, reference_images_base64, max_retries)
+        return _call_openai_image_edit(endpoint, prompt, model, size, api_key, reference_images_base64, max_retries, response_format)
     else:
         # 文生图：使用 /v1/images/generations (JSON)
         endpoint = f"{base_url}/v1/images/generations"
-        return _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries)
+        return _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries, response_format)
 
 
-def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries):
+def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries, response_format="url"):
     """
     调用 OpenAI 格式的文生图 API (/v1/images/generations)
     """
@@ -196,7 +198,7 @@ def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_re
         "model": model,
         "prompt": prompt,
         "size": size,
-        "response_format": "b64_json",
+        "response_format": response_format,
     }
     
     logger.debug(f"OpenAI API request: {endpoint}, model={model}, size={size}")
@@ -263,7 +265,7 @@ def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_re
     raise Exception("已达最大重试次数，请求失败")
 
 
-def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base64, max_retries):
+def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base64, max_retries, response_format="url"):
     """
     调用 OpenAI 格式的图生图 API (/v1/images/edits)
     使用 multipart/form-data 格式，支持多张参考图
@@ -283,7 +285,7 @@ def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base6
         "model": model,
         "prompt": prompt,
         "size": size,
-        "response_format": "b64_json",
+        "response_format": response_format,
     }
     
     logger.debug(f"OpenAI Edit API request: {endpoint}, model={model}, size={size}, images={len(images_base64)}")
@@ -385,7 +387,8 @@ def call_nano_banana_api(
     seed=None,
     api_key=None,
     reference_images_base64=None,  # 支持多个参考图（列表）
-    max_retries=3
+    max_retries=3,
+    response_format="url"
 ):
     """
     Call the Gemini Nano Banana API using official Gemini format
@@ -399,6 +402,7 @@ def call_nano_banana_api(
         api_key (str): API key for authentication
         reference_images_base64 (list): List of base64 encoded reference images for image-to-image
         max_retries (int): Maximum number of retry attempts
+        response_format (str): Response format "url" or "b64_json"
         
     Returns:
         dict: API response containing the generated image
@@ -411,7 +415,7 @@ def call_nano_banana_api(
     if is_openai_format_model(model):
         # 使用 OpenAI 格式 API
         actual_model, size = get_openai_model_and_size(model, aspect_ratio, image_size or "1K")
-        logger.debug(f"Using OpenAI format: model={actual_model}, size={size}")
+        logger.debug(f"Using OpenAI format: model={actual_model}, size={size}, response_format={response_format}")
         
         # 直接返回 PIL.Image（与 Gemini 格式的返回值不同）
         pil_image = call_openai_format_api(
@@ -420,7 +424,8 @@ def call_nano_banana_api(
             size=size,
             api_key=api_key,
             reference_images_base64=reference_images_base64,  # 支持多张参考图
-            max_retries=max_retries
+            max_retries=max_retries,
+            response_format=response_format
         )
         
         # 包装成与 Gemini 格式兼容的响应结构
@@ -843,194 +848,6 @@ def process_api_response(response_data):
     except Exception as e:
         logger.error(f"Failed to process API response: {str(e)}")
         raise
-
-
-# ============================================================
-# 批量请求管理器 - 封装限流和进度管理逻辑
-# ============================================================
-
-class BatchRequestManager:
-    """
-    批量请求管理器
-    
-    负责管理批量 API 请求的限流、进度追踪和自适应调整。
-    设计为独立模块，便于后续优化和扩展。
-    
-    特性：
-    - 请求间隔控制：防止过快请求导致服务器过载
-    - 自适应限流：遇到限流错误时自动增加间隔
-    - 进度追踪：计算预估完成时间
-    - 失败处理：连续失败时自动增加等待时间
-    """
-    
-    def __init__(self, request_interval=2.0, min_interval=0.5, max_interval=30.0):
-        """
-        初始化批量请求管理器
-        
-        Args:
-            request_interval: 基础请求间隔（秒）
-            min_interval: 最小请求间隔（秒）
-            max_interval: 最大请求间隔（秒）
-        """
-        self.base_interval = request_interval
-        self.current_interval = request_interval
-        self.min_interval = min_interval
-        self.max_interval = max_interval
-        
-        # 统计数据
-        self.total_count = 0
-        self.success_count = 0
-        self.failed_count = 0
-        self.processed_count = 0
-        self.consecutive_failures = 0
-        
-        # 时间追踪
-        self.start_time = None
-        self.processing_times = []  # 记录每次处理耗时，用于更准确的ETA
-    
-    def start(self, total_count):
-        """开始批量处理"""
-        import time
-        self.total_count = total_count
-        self.success_count = 0
-        self.failed_count = 0
-        self.processed_count = 0
-        self.consecutive_failures = 0
-        self.current_interval = self.base_interval
-        self.start_time = time.time()
-        self.processing_times = []
-    
-    def record_success(self, processing_time=None):
-        """记录成功"""
-        self.success_count += 1
-        self.processed_count += 1
-        self.consecutive_failures = 0
-        
-        # 记录处理时间
-        if processing_time:
-            self.processing_times.append(processing_time)
-            # 只保留最近20次的数据，用于计算滑动平均
-            if len(self.processing_times) > 20:
-                self.processing_times.pop(0)
-        
-        # 成功后逐渐恢复正常间隔
-        if self.current_interval > self.base_interval:
-            self.current_interval = max(self.base_interval, self.current_interval * 0.9)
-    
-    def record_failure(self, is_rate_limit=False):
-        """
-        记录失败
-        
-        Args:
-            is_rate_limit: 是否为限流错误
-        """
-        self.failed_count += 1
-        self.processed_count += 1
-        self.consecutive_failures += 1
-        
-        if is_rate_limit:
-            # 限流错误：增加间隔
-            self.current_interval = min(self.current_interval * 1.5, self.max_interval)
-    
-    def get_wait_time(self):
-        """获取下次请求前需要等待的时间"""
-        import time
-        
-        # 基础等待时间
-        wait_time = self.current_interval
-        
-        # 连续失败时额外等待
-        if self.consecutive_failures >= 3:
-            extra_wait = min(self.consecutive_failures * 3, 15)
-            wait_time += extra_wait
-        
-        return wait_time
-    
-    def wait_before_next(self):
-        """在下次请求前等待"""
-        import time
-        if self.processed_count < self.total_count:
-            wait_time = self.get_wait_time()
-            time.sleep(wait_time)
-            return wait_time
-        return 0
-    
-    def get_progress_info(self):
-        """
-        获取进度信息
-        
-        Returns:
-            dict: 包含进度百分比、预估剩余时间等信息
-        """
-        import time
-        
-        progress_pct = (self.processed_count / self.total_count * 100) if self.total_count > 0 else 0
-        elapsed = time.time() - self.start_time if self.start_time else 0
-        
-        # 计算 ETA
-        if self.success_count > 0 and len(self.processing_times) > 0:
-            # 使用滑动平均计算更准确的预估
-            avg_time = sum(self.processing_times) / len(self.processing_times)
-            remaining = self.total_count - self.processed_count
-            eta_seconds = avg_time * remaining
-        elif self.success_count > 0:
-            avg_time = elapsed / self.success_count
-            remaining = self.total_count - self.processed_count
-            eta_seconds = avg_time * remaining
-        else:
-            eta_seconds = None
-        
-        return {
-            "processed": self.processed_count,
-            "total": self.total_count,
-            "success": self.success_count,
-            "failed": self.failed_count,
-            "progress_pct": progress_pct,
-            "elapsed_seconds": elapsed,
-            "eta_seconds": eta_seconds,
-            "current_interval": self.current_interval,
-        }
-    
-    def format_eta(self):
-        """格式化预估剩余时间"""
-        info = self.get_progress_info()
-        eta = info.get("eta_seconds")
-        if eta is None:
-            return "计算中..."
-        return format_time(eta)
-    
-    def get_summary(self):
-        """
-        获取批量处理汇总信息
-        
-        Returns:
-            dict: 汇总统计数据
-        """
-        import time
-        total_time = time.time() - self.start_time if self.start_time else 0
-        avg_time = total_time / max(self.success_count, 1)
-        success_rate = (self.success_count / self.total_count * 100) if self.total_count > 0 else 0
-        
-        return {
-            "total": self.total_count,
-            "success": self.success_count,
-            "failed": self.failed_count,
-            "success_rate": success_rate,
-            "total_time_seconds": total_time,
-            "avg_time_seconds": avg_time,
-        }
-    
-    @staticmethod
-    def is_rate_limit_error(error_str):
-        """检测是否为限流错误"""
-        error_lower = error_str.lower()
-        return (
-            "429" in error_str or 
-            "频繁" in error_str or 
-            "rate" in error_lower or
-            "too many" in error_lower or
-            "limit" in error_lower
-        )
 
 
 def format_time(seconds):
