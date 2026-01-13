@@ -639,22 +639,37 @@ def extract_image_from_gemini_response(response_data):
         PIL.Image: Extracted image
     """
     try:
-        # 🔍 输出完整的 API 返回内容
-    #   print("\n" + "="*80)
-    #   print("🔍 官方 API 完整返回内容 (JSON 格式)")
-    #   print("="*80)
-    #   import json
-    #   print(json.dumps(response_data, indent=2, ensure_ascii=False))
-    #   print("="*80 + "\n")
-    #         
         # Navigate the response structure
         if 'candidates' not in response_data or len(response_data['candidates']) == 0:
+            # 打印调试信息帮助诊断
+            import json
+            print("\n" + "="*60)
+            print("❌ API 响应结构异常 - 调试信息")
+            print("="*60)
+            print(f"响应键: {list(response_data.keys())}")
+            # 限制输出长度，避免刷屏
+            response_str = json.dumps(response_data, indent=2, ensure_ascii=False)
+            if len(response_str) > 1000:
+                response_str = response_str[:1000] + "\n... (输出已截断)"
+            print(response_str)
+            print("="*60 + "\n")
             raise Exception("No candidates in API response")
         
         candidate = response_data['candidates'][0]
         
         if 'content' not in candidate or 'parts' not in candidate['content']:
-            raise Exception("Invalid response structure")
+            # 打印调试信息帮助诊断
+            import json
+            print("\n" + "="*60)
+            print("❌ API 响应结构异常 - 调试信息")
+            print("="*60)
+            print(f"候选项键: {list(candidate.keys())}")
+            candidate_str = json.dumps(candidate, indent=2, ensure_ascii=False)
+            if len(candidate_str) > 1000:
+                candidate_str = candidate_str[:1000] + "\n... (输出已截断)"
+            print(candidate_str)
+            print("="*60 + "\n")
+            raise Exception("Invalid response structure: missing content or parts")
         
         parts = candidate['content']['parts']
         
