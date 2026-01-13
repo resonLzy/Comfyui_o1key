@@ -927,7 +927,7 @@ def load_images_from_folder(folder_path, file_pattern="*.png,*.jpg,*.jpeg"):
 
 def save_image_to_folder(pil_image, output_folder, filename):
     """
-    保存PIL图片到文件夹
+    保存PIL图片到文件夹（自动重命名避免覆盖）
     
     Args:
         pil_image (PIL.Image): PIL图片对象
@@ -946,10 +946,26 @@ def save_image_to_folder(pil_image, output_folder, filename):
     # 构建完整路径
     output_path = os.path.join(output_folder, filename)
     
+    # 防覆盖：如果文件已存在，自动添加 _1, _2, _3... 后缀
+    if os.path.exists(output_path):
+        # 拆分文件名和扩展名
+        name, ext = os.path.splitext(filename)
+        counter = 1
+        
+        # 寻找可用的文件名
+        while True:
+            new_filename = f"{name}_{counter}{ext}"
+            output_path = os.path.join(output_folder, new_filename)
+            if not os.path.exists(output_path):
+                logger.debug(f"文件已存在，重命名: {filename} -> {new_filename}")
+                break
+            counter += 1
+    
     # 保存图片
     try:
         pil_image.save(output_path, quality=95)
-        logger.debug(f"已保存: {filename}")
+        saved_filename = os.path.basename(output_path)
+        logger.debug(f"已保存: {saved_filename}")
         return output_path
     except Exception as e:
         logger.error(f"保存图片失败 {filename}: {str(e)}")
