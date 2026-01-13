@@ -657,7 +657,59 @@ def extract_image_from_gemini_response(response_data):
         
         candidate = response_data['candidates'][0]
         
+        # 检查是否有错误的 finishReason
+        finish_reason = candidate.get('finishReason', '')
+        
+        # 调试：打印 finishReason
+        if finish_reason and finish_reason != 'STOP':
+            logger.warning(f"API finishReason: {finish_reason}")
+        
+        # 处理 MALFORMED_FUNCTION_CALL 错误
+        if finish_reason == 'MALFORMED_FUNCTION_CALL':
+            finish_message = candidate.get('finishMessage', '')
+            import json
+            print("\n" + "="*60)
+            print("❌ API 模型调用异常")
+            print("="*60)
+            print(f"错误类型: {finish_reason}")
+            if finish_message:
+                # 截取关键信息
+                short_msg = finish_message[:300] if len(finish_message) > 300 else finish_message
+                print(f"错误详情: {short_msg}")
+            print("="*60 + "\n")
+            raise Exception(
+                "API 后端模型调用异常 (MALFORMED_FUNCTION_CALL)\n"
+                "💡 建议：\n"
+                "   • 这是 API 服务端的临时错误，请稍后重试\n"
+                "   • 如持续出现，可尝试简化提示词或更换模型"
+            )
+        
+        # 处理其他非正常结束原因
+        if finish_reason and finish_reason not in ['STOP', 'MAX_TOKENS', '']:
+            import json
+            print("\n" + "="*60)
+            print(f"⚠️ API 响应异常终止: {finish_reason}")
+            print("="*60)
+            candidate_str = json.dumps(candidate, indent=2, ensure_ascii=False)
+            if len(candidate_str) > 500:
+                candidate_str = candidate_str[:500] + "\n... (输出已截断)"
+            print(candidate_str)
+            print("="*60 + "\n")
+            
+            # 根据不同原因给出提示
+            reason_messages = {
+                'SAFETY': "内容被安全过滤器拦截，请修改提示词",
+                'RECITATION': "内容因版权问题被拦截",
+                'OTHER': "API 返回未知错误，请稍后重试",
+            }
+            msg = reason_messages.get(finish_reason, f"API 异常终止: {finish_reason}")
+            raise Exception(msg)
+        
         if 'content' not in candidate or 'parts' not in candidate['content']:
+            # 检查 content 是否为空对象
+            content = candidate.get('content', {})
+            is_empty_content = (content == {} or content is None)
+            
             # 打印调试信息帮助诊断
             import json
             print("\n" + "="*60)
@@ -669,6 +721,14 @@ def extract_image_from_gemini_response(response_data):
                 candidate_str = candidate_str[:1000] + "\n... (输出已截断)"
             print(candidate_str)
             print("="*60 + "\n")
+            
+            if is_empty_content:
+                raise Exception(
+                    "API 返回了空的响应内容\n"
+                    "💡 建议：\n"
+                    "   • 这通常是 API 服务端的临时问题\n"
+                    "   • 请稍后重试，或尝试更换模型"
+                )
             raise Exception("Invalid response structure: missing content or parts")
         
         parts = candidate['content']['parts']
@@ -716,7 +776,27 @@ def extract_image_from_gemini_response(response_data):
                     return download_image_from_url(url)
         
         # If we get here, no image data was found
-        raise Exception("No image data found in response (neither inline_data nor URL)")
+        # 打印调试信息帮助诊断
+        import json
+        print("\n" + "="*60)
+        print("❌ API 返回中未找到图片数据")
+        print("="*60)
+        print(f"Parts 数量: {len(parts)}")
+        for idx, part in enumerate(parts):
+            print(f"Part {idx} 键: {list(part.keys())}")
+            # 如果有 text，打印部分内容
+            if 'text' in part:
+                text_preview = part['text'][:200] if len(part['text']) > 200 else part['text']
+                print(f"Part {idx} text: {text_preview}")
+        print("="*60 + "\n")
+        
+        raise Exception(
+            "API 返回中未找到图片数据\n"
+            "💡 建议：\n"
+            "   • 这可能是提示词触发了 API 的异常行为\n"
+            "   • 请尝试使用英文提示词或简化提示词内容\n"
+            "   • 如持续出现，请稍后重试"
+        )
         
     except Exception as e:
         logger.error(f"Failed to extract image from response: {str(e)}")
