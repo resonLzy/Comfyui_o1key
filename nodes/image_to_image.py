@@ -2,6 +2,7 @@
 ComfyUI node for image-to-image generation using Nano Banana API
 """
 import logging
+import time
 
 # Try relative import first (when used as package), fallback to absolute
 try:
@@ -36,14 +37,14 @@ class NanoBananaImageToImage:
                     "multiline": True,
                     "default": "transform this into a watercolor painting"
                 }),
-                "api_key": ("STRING", {
-                    "multiline": False,
-                    "default": ""
-                }),
                 "model": ([
                     "nano-banana-pro-default",
-                    "nano-banana-pro-svip", 
-                    "nano-banana-svip"
+                    "gemini-3-pro-image-preview-url",
+                    "gemini-3-pro-image-preview-2k-url",
+                    "gemini-3-pro-image-preview-4k-url",
+                    "gemini-3-pro-image-preview",
+                    "gemini-3-pro-image-preview-2k",
+                    "gemini-3-pro-image-preview-4k",
                 ], {
                     "default": "nano-banana-pro-default"
                 }),
@@ -72,6 +73,15 @@ class NanoBananaImageToImage:
                     "max": 2147483647,
                     "display": "number"
                 }),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": ""
+                }),
+                "proxy": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "http://127.0.0.1:7890"
+                }),
             }
         }
     
@@ -80,7 +90,7 @@ class NanoBananaImageToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, image, prompt, api_key, model, aspect_ratio, image_size="2K", response_format="url", image_2=None, image_3=None, image_4=None, image_5=None, image_6=None, seed=-1):
+    def generate_image(self, image, prompt, model, aspect_ratio, image_size="2K", response_format="url", image_2=None, image_3=None, image_4=None, image_5=None, image_6=None, seed=-1, api_key="", proxy=""):
         """
         Generate image from reference image and text prompt
         """
@@ -118,18 +128,23 @@ class NanoBananaImageToImage:
             
             logger.debug(f"Total reference images: {num_references}")
             
-            # Convert all reference images to base64
+            _start_total = time.time()
+            
+            # ========== 阶段1: 图片转 Base64 ==========
+            print(f"\n⏱️  [阶段1] 图片转 Base64...", flush=True)
+            _t1 = time.time()
             reference_base64_list = []
-            for ref_img in reference_images:
-                reference_base64_list.append(comfy_image_to_base64(ref_img))
+            for idx, ref_img in enumerate(reference_images, 1):
+                _t_conv = time.time()
+                b64 = comfy_image_to_base64(ref_img)
+                reference_base64_list.append(b64)
+                print(f"    图{idx}: {len(b64)/1024:.0f} KB ({time.time()-_t_conv:.2f}s)", flush=True)
+            print(f"    ✅ 阶段1完成: {time.time()-_t1:.2f}s", flush=True)
             
-            # 状态1: 正在转换（开始）
-            print(f"📝 正在转换")
+            # ========== 阶段2: 调用API ==========
+            print(f"\n⏱️  [阶段2] 调用 API...", flush=True)
+            _t2 = time.time()
             
-            # 状态2: 等待API返回（调用API前）
-            print(f"⏳ 耐心等待，好饭不怕晚...")
-            
-            # 调用API（image_size会由API函数内部判断是否使用）
             response_data = call_nano_banana_api(
                 prompt=prompt,
                 model=model,
@@ -138,12 +153,26 @@ class NanoBananaImageToImage:
                 seed=seed_param,
                 api_key=api_key,
                 reference_images_base64=reference_base64_list,
-                response_format=response_format
+                response_format=response_format,
+                proxy=proxy
             )
+            print(f"    ✅ 阶段2完成: {time.time()-_t2:.2f}s", flush=True)
 
-            # API返回200后，处理图片
-            pil_image = process_api_response(response_data)
+            # ========== 阶段3: 处理响应 ==========
+            print(f"\n⏱️  [阶段3] 处理响应...", flush=True)
+            _t3 = time.time()
+            pil_image = process_api_response(response_data, proxy=proxy)
+            print(f"    ✅ 阶段3完成: {time.time()-_t3:.2f}s", flush=True)
+            
+            # ========== 阶段4: 转换格式 ==========
+            print(f"\n⏱️  [阶段4] 转 ComfyUI 格式...", flush=True)
+            _t4 = time.time()
             comfy_image = pil_to_comfy_image(pil_image)
+            print(f"    ✅ 阶段4完成: {time.time()-_t4:.2f}s", flush=True)
+            
+            print(f"\n{'='*50}", flush=True)
+            print(f"⏱️  本地总耗时: {time.time()-_start_total:.2f}s", flush=True)
+            print(f"{'='*50}", flush=True)
             
             # 状态3: 完成
             print(f"✅ 完成：改造完成！")

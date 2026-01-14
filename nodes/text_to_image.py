@@ -33,14 +33,14 @@ class NanoBananaTextToImage:
                     "multiline": True,
                     "default": "a beautiful sunset over mountains"
                 }),
-                "api_key": ("STRING", {
-                    "multiline": False,
-                    "default": ""
-                }),
                 "model": ([
                     "nano-banana-pro-default",
-                    "nano-banana-pro-svip", 
-                    "nano-banana-svip"
+                    "gemini-3-pro-image-preview-url",
+                    "gemini-3-pro-image-preview-2k-url",
+                    "gemini-3-pro-image-preview-4k-url",
+                    "gemini-3-pro-image-preview",
+                    "gemini-3-pro-image-preview-2k",
+                    "gemini-3-pro-image-preview-4k",
                 ], {
                     "default": "nano-banana-pro-default"
                 }),
@@ -64,6 +64,15 @@ class NanoBananaTextToImage:
                     "max": 2147483647,
                     "display": "number"
                 }),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": ""
+                }),
+                "proxy": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "http://127.0.0.1:7890"
+                }),
             }
         }
     
@@ -72,7 +81,7 @@ class NanoBananaTextToImage:
     FUNCTION = "generate_image"
     CATEGORY = "o1key"
     
-    def generate_image(self, prompt, api_key, model, aspect_ratio, image_size="2K", response_format="url", seed=-1):
+    def generate_image(self, prompt, model, aspect_ratio, image_size="2K", response_format="url", seed=-1, api_key="", proxy=""):
         """
         Generate image from text prompt
         """
@@ -88,6 +97,8 @@ class NanoBananaTextToImage:
             print(f"宽高比    {aspect_ratio}")
             print(f"清晰度    {image_size}")
             print(f"返回格式  {response_format}")
+            if proxy:
+                print(f"代理      {proxy}")
             print(f"{'='*60}\n")
             
             logger.debug(f"Full params - Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}")
@@ -106,11 +117,12 @@ class NanoBananaTextToImage:
                 image_size=image_size,
                 seed=seed_param,
                 api_key=api_key,
-                response_format=response_format
+                response_format=response_format,
+                proxy=proxy
             )
 
             # API返回200后，处理图片
-            pil_image = process_api_response(response_data)
+            pil_image = process_api_response(response_data, proxy=proxy)
             comfy_image = pil_to_comfy_image(pil_image)
             
             # 状态3: 完成

@@ -48,14 +48,14 @@ class NanoBananaBatchProcessor:
                     "multiline": True,
                     "default": "enhance this image\n每行一个提示词，支持多批次处理"
                 }),
-                "api_key": ("STRING", {
-                    "multiline": False,
-                    "default": ""
-                }),
                 "model": ([
                     "nano-banana-pro-default",
-                    "nano-banana-pro-svip", 
-                    "nano-banana-svip"
+                    "gemini-3-pro-image-preview-url",
+                    "gemini-3-pro-image-preview-2k-url",
+                    "gemini-3-pro-image-preview-4k-url",
+                    "gemini-3-pro-image-preview",
+                    "gemini-3-pro-image-preview-2k",
+                    "gemini-3-pro-image-preview-4k",
                 ], {
                     "default": "nano-banana-pro-default"
                 }),
@@ -98,6 +98,15 @@ class NanoBananaBatchProcessor:
                 "image_4": ("IMAGE",),
                 "image_5": ("IMAGE",),
                 "image_6": ("IMAGE",),
+                "api_key": ("STRING", {
+                    "multiline": False,
+                    "default": ""
+                }),
+                "proxy": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "http://127.0.0.1:7890"
+                }),
             }
         }
     
@@ -106,11 +115,12 @@ class NanoBananaBatchProcessor:
     FUNCTION = "process_batch"
     CATEGORY = "o1key/batch"
     
-    def process_batch(self, prompt, api_key, model, aspect_ratio, image_size, 
+    def process_batch(self, prompt, model, aspect_ratio, image_size, 
                      response_format, folder_path, file_pattern, output_folder,
                      seed=-1,
                      image_1=None, image_2=None, image_3=None, 
-                     image_4=None, image_5=None, image_6=None):
+                     image_4=None, image_5=None, image_6=None,
+                     api_key="", proxy=""):
         """
         批量处理文件夹中的图片，支持多提示词
         """
@@ -211,11 +221,12 @@ class NanoBananaBatchProcessor:
                             seed=seed_param,
                             api_key=api_key,
                             reference_images_base64=ref_base64_list,
-                            response_format=response_format
+                            response_format=response_format,
+                            proxy=proxy
                         )
                         
                         # 处理响应
-                        result_pil = process_api_response(response_data)
+                        result_pil = process_api_response(response_data, proxy=proxy)
                         result_comfy = pil_to_comfy_image(result_pil)
                         all_processed_images.append(result_comfy)
                         

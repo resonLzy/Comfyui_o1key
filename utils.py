@@ -5,6 +5,7 @@ Uses official Gemini API format for full compatibility
 import requests
 import base64
 import io
+import json
 import numpy as np
 import torch
 from PIL import Image
@@ -21,6 +22,31 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# API 基础地址配置
+# ============================================================
+# 方式1: 通过 Cloudflare (正常使用)
+# API_BASE_URL = "https://api.o1key.com"
+
+# 方式3: 直连香港上游 API (测试速度)
+API_BASE_URL = "https://hk-api.aabao.top"
+# ============================================================
+
+# ============================================================
+# 代理配置 (加速下载)
+# ============================================================
+# 设置为 None 表示不使用代理
+# 设置为代理地址启用代理，例如:
+#   "http://127.0.0.1:10808"  (HTTP 代理)
+#   "socks5://127.0.0.1:10808" (SOCKS5 代理)
+
+# PROXY_URL = "http://127.0.0.1:10808"  # 你的本地代理
+PROXY_URL = None  # 不使用代理（测试直连新加坡）
+
+# 构建 proxies 字典
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+# ============================================================
 
 
 def parse_api_error(status_code, error_text):
@@ -69,9 +95,26 @@ def parse_api_error(status_code, error_text):
 # Model name mapping: UI name -> Official API name
 # This allows user-friendly names in the interface while using official names for API calls
 MODEL_NAME_MAPPING = {
-    "nano-banana-svip": "nano-banana-svip",
-    "nano-banana-pro-svip": "nano-banana-pro-svip",
+    # svip 模型已移除
 }
+
+# Gemini 3 Pro Image Preview URL 系列模型
+# 这些模型使用 Gemini 原生格式，需要 responseModalities 配置
+# 注意：这些模型名已包含尺寸信息，不需要动态添加尺寸后缀
+GEMINI_URL_MODELS = [
+    "gemini-3-pro-image-preview-url",
+    "gemini-3-pro-image-preview-2k-url",
+    "gemini-3-pro-image-preview-4k-url",
+]
+
+# Gemini 3 Pro Image Preview B64 系列模型
+# 这些模型使用 Gemini 原生格式，默认返回 b64_json 格式
+# 注意：这些模型名已包含尺寸信息，不需要动态添加尺寸后缀
+GEMINI_B64_MODELS = [
+    "gemini-3-pro-image-preview",
+    "gemini-3-pro-image-preview-2k",
+    "gemini-3-pro-image-preview-4k",
+]
 
 # 新模型列表 (使用 OpenAI 格式 API)
 # 这些模型通过 New API 后台映射到实际的 Gemini 3 Pro Image Preview 模型
@@ -208,7 +251,7 @@ def call_openai_format_api(
     if not api_key:
         raise ValueError("API key is required")
     
-    base_url = "https://api.o1key.com"
+    base_url = API_BASE_URL
     
     # 根据是否有参考图选择接口
     if reference_images_base64 and len(reference_images_base64) > 0:
@@ -435,7 +478,8 @@ def call_nano_banana_api(
     seed=None,
     api_key=None,
     reference_images_base64=None,  # 支持多个参考图（列表）
-    response_format="url"
+    response_format="url",
+    proxy=""  # 用户自定义代理，如 http://127.0.0.1:7890
 ):
     """
     Call the Gemini Nano Banana API using official Gemini format
@@ -483,13 +527,26 @@ def call_nano_banana_api(
     # Convert user-friendly model name to official API name
     official_model = get_official_model_name(model)
     
+    # 对于 GEMINI_B64_MODELS 系列模型，默认使用 b64_json 格式
+    # 这些模型使用 Gemini 格式 API，默认返回 base64 编码的图片数据
+    is_gemini_b64_model = official_model in GEMINI_B64_MODELS
+    if is_gemini_b64_model and response_format == "url":
+        # 这些模型默认返回 b64_json，如果用户选择了 url，我们仍然使用 b64_json
+        # 因为 Gemini 格式 API 的响应格式是由 API 本身决定的
+        response_format = "b64_json"
+        logger.debug(f"Model {model} is in GEMINI_B64_MODELS, using b64_json format")
+    
+    # 检查是否为 Gemini URL 系列模型（已包含尺寸信息的模型）
+    is_gemini_url_model = official_model in GEMINI_URL_MODELS
+    
     # 处理以 -url 结尾的模型（如 gemini-3-pro-image-preview-url）
     # 根据 image_size 动态生成实际模型名
     # 平台模型命名规则：
     #   - 1K/默认: gemini-3-pro-image-preview-url (没有 1k)
     #   - 2K: gemini-3-pro-image-preview-2k-url
     #   - 4K: gemini-3-pro-image-preview-4k-url
-    if official_model.endswith("-url") and image_size:
+    # 注意：如果模型已在 GEMINI_URL_MODELS 中（已包含尺寸后缀），则跳过动态添加
+    if official_model.endswith("-url") and image_size and not is_gemini_url_model:
         if image_size in ["2K", "4K"]:
             base_model = official_model[:-4]  # 去掉 "-url"
             size_lower = image_size.lower()  # 2K -> 2k, 4K -> 4k
@@ -500,7 +557,7 @@ def call_nano_banana_api(
     
     # Build the API endpoint (New API platform format)
     # New API will map model names and proxy to Google AI Studio
-    base_url = f"https://api.o1key.com/v1beta/models/{official_model}:generateContent"
+    base_url = f"{API_BASE_URL}/v1beta/models/{official_model}:generateContent"
     
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -538,18 +595,34 @@ def call_nano_banana_api(
     generation_config = {
         "imageConfig": image_config
     }
+    
+    # 对于 Gemini URL 系列模型，需要添加 responseModalities 配置
+    # 这告诉 API 返回 TEXT 和 IMAGE 两种模态
+    if is_gemini_url_model:
+        generation_config["responseModalities"] = ["TEXT", "IMAGE"]
+    
     # Add seed if provided
     # 注释掉：不再传递种子参数到 API
     # if seed is not None:
     #     generation_config["seed"] = seed
     
     # Complete request body
-    body = {
-        "contents": [{
-            "parts": parts
-        }],
-        "generationConfig": generation_config
-    }
+    # 对于 Gemini URL 系列模型，需要添加 role 字段
+    if is_gemini_url_model:
+        body = {
+            "contents": [{
+                "role": "user",
+                "parts": parts
+            }],
+            "generationConfig": generation_config
+        }
+    else:
+        body = {
+            "contents": [{
+                "parts": parts
+            }],
+            "generationConfig": generation_config
+        }
     
     logger.debug(f"Request body structure: {list(body.keys())}")
     logger.debug(f"imageConfig: {image_config}")
@@ -563,21 +636,70 @@ def call_nano_banana_api(
         logger.debug(f"Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}, Seed: {seed}")
         logger.debug(f"Prompt: {prompt[:100]}...")
         
+        # 计算请求体大小
+        body_json_str = json.dumps(body)
+        body_size = len(body_json_str)
+        print(f"    📤 请求体: {body_size/1024:.0f} KB ({body_size/(1024*1024):.1f} MB)", flush=True)
+        print(f"    🌐 地址: {base_url}", flush=True)
+        
+        if body_size > 5 * 1024 * 1024:  # 大于5MB
+            print(f"    ⚠️  警告: 请求体较大，上传可能需要较长时间...", flush=True)
+        
+        # 构建代理配置：优先使用用户传入的 proxy，其次使用全局配置
+        user_proxy = proxy.strip() if proxy else None
+        active_proxy = user_proxy or PROXY_URL
+        proxies_dict = {"http": active_proxy, "https": active_proxy} if active_proxy else None
+        
+        if active_proxy:
+            print(f"    🔀 代理: {active_proxy}", flush=True)
+        print(f"    ⏳ 发送请求...", flush=True)
+        _t_request = time.time()
+        
+        # 使用 stream=True 分块下载，可以看到进度
         response = requests.post(
             base_url,
             headers=headers,
             json=body,
-            timeout=300,  # 增加超时时间到 5 分钟，给 4K 图片更多处理时间
-            verify=False  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
+            timeout=(30, 600),
+            verify=False,
+            stream=True,
+            proxies=proxies_dict  # 使用代理
         )
+        _t_connect = time.time() - _t_request
+        print(f"    🔗 连接建立: {_t_connect:.2f}s, 状态: {response.status_code}", flush=True)
         
         # Check if request was successful
         if response.status_code == 200:
             try:
-                response_json = response.json()
+                # 流式下载响应体
+                print(f"    📥 下载响应中...", flush=True)
+                _t_download = time.time()
+                
+                chunks = []
+                downloaded = 0
+                for chunk in response.iter_content(chunk_size=64*1024):  # 64KB 块
+                    if chunk:
+                        chunks.append(chunk)
+                        downloaded += len(chunk)
+                        # 每 500KB 打印一次进度
+                        if downloaded % (512*1024) < 64*1024:
+                            print(f"        已下载: {downloaded/1024:.0f} KB", flush=True)
+                
+                content = b''.join(chunks)
+                _download_time = time.time() - _t_download
+                print(f"    ✅ 下载完成: {len(content)/1024:.0f} KB, 耗时: {_download_time:.2f}s", flush=True)
+                
+                # 计算下载速度
+                if _download_time > 0:
+                    speed_mbps = (len(content) * 8) / (_download_time * 1024 * 1024)
+                    print(f"    📊 下载速度: {speed_mbps:.2f} Mbps", flush=True)
+                
+                _t_json = time.time()
+                response_json = json.loads(content.decode('utf-8'))
+                print(f"    🔄 JSON解析: {time.time()-_t_json:.2f}s", flush=True)
                 return response_json
-            except json.JSONDecodeError:
-                logger.warning("响应不是有效的 JSON 格式")
+            except json.JSONDecodeError as e:
+                logger.warning(f"响应不是有效的 JSON 格式: {str(e)}")
                 raise Exception("API 返回了非 JSON 格式的响应")
         else:
             # 解析错误响应，检测特定错误类型
@@ -619,6 +741,7 @@ def call_nano_banana_api(
                 raise Exception(f"❌ {friendly_error}\n💡 建议稍后手动重试或降低图片清晰度")
                 
     except requests.exceptions.Timeout:
+        print(f"⏰ 请求超时 (超过10分钟)")
         raise Exception(
             "❌ 请求超时\n\n"
             "💡 提示：\n"
@@ -627,11 +750,12 @@ def call_nano_banana_api(
             "   • 建议稍后检查是否已扣费，避免重复提交"
         )
     except requests.exceptions.RequestException as e:
+        print(f"❌ 网络错误: {str(e)}")
         logger.error(f"Network error: {str(e)}")
         raise Exception(f"❌ 网络错误: {str(e)}\n💡 请检查网络连接后手动重试")
 
 
-def extract_image_from_gemini_response(response_data):
+def extract_image_from_gemini_response(response_data, proxy=""):
     """
     Extract image data from Gemini API response
     
@@ -663,6 +787,7 @@ def extract_image_from_gemini_response(response_data):
     
     Args:
         response_data (dict): Gemini API response
+        proxy (str): 可选的代理地址，用于下载图片
         
     Returns:
         PIL.Image: Extracted image
@@ -737,12 +862,18 @@ def extract_image_from_gemini_response(response_data):
                     # 标准 Gemini 格式
                     base64_data = inline_data.get('data')
                     if base64_data:
-                        logger.debug("Found inline_data (standard Gemini format with dict)")
-                        return decode_base64_image(base64_data)
+                        print(f"    🖼️  图片数据: {len(base64_data)/1024:.0f} KB")
+                        _t_decode = time.time()
+                        result = decode_base64_image(base64_data)
+                        print(f"    🔓 Base64解码: {time.time()-_t_decode:.2f}s")
+                        return result
                 elif isinstance(inline_data, str):
                     # SVIP 格式：直接是 base64 字符串
-                    logger.debug("Found inline_data (SVIP format with direct base64 string)")
-                    return decode_base64_image(inline_data)
+                    print(f"    🖼️  图片数据: {len(inline_data)/1024:.0f} KB")
+                    _t_decode = time.time()
+                    result = decode_base64_image(inline_data)
+                    print(f"    🔓 Base64解码: {time.time()-_t_decode:.2f}s")
+                    return result
         
         # If no inline_data, try to extract URL from text (New API format)
         for part in parts:
@@ -755,17 +886,20 @@ def extract_image_from_gemini_response(response_data):
                 markdown_match = re.search(r'!\[.*?\]\((https?://[^\)]+)\)', text)
                 if markdown_match:
                     url = markdown_match.group(1)
-                    print(f"正在下载图片...")
-                    logger.debug(f"URL: {url}")
-                    return download_image_from_url(url)
+                    print(f"📥 正在下载图片...", flush=True)
+                    # 打印部分 URL 帮助调试
+                    url_display = url[:60] + "..." if len(url) > 60 else url
+                    logger.debug(f"URL: {url_display}")
+                    return download_image_from_url(url, proxy=proxy)
                 
                 # Try to find plain HTTP URL
                 url_match = re.search(r'(https?://[^\s\)]+\.(?:png|jpg|jpeg|webp|gif))', text, re.IGNORECASE)
                 if url_match:
                     url = url_match.group(1)
-                    print(f"正在下载图片...")
-                    logger.debug(f"URL: {url}")
-                    return download_image_from_url(url)
+                    print(f"📥 正在下载图片...", flush=True)
+                    url_display = url[:60] + "..." if len(url) > 60 else url
+                    logger.debug(f"URL: {url_display}")
+                    return download_image_from_url(url, proxy=proxy)
         
         # If we get here, no image data was found
         logger.error(f"API 返回中未找到图片数据，Parts 数量: {len(parts)}")
@@ -819,34 +953,90 @@ def decode_base64_image(base64_string):
         
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
-        # print(f"图片解码成功: {image.size[0]}x{image.size[1]}")
+        print(f"    📐 图片尺寸: {image.size[0]}x{image.size[1]}")
         return image
     except Exception as e:
         logger.error(f"Failed to decode base64 image: {str(e)}")
         raise
 
 
-def download_image_from_url(url):
+def download_image_from_url(url, max_retries=3, proxy=""):
     """
     Download image from URL and convert to PIL Image
     
     Args:
         url (str): URL of the image
+        max_retries (int): Maximum number of retry attempts
+        proxy (str): 可选的代理地址
         
     Returns:
         PIL.Image: Downloaded image
     """
-    try:
-        logger.debug(f"Downloading from: {url}")
-        response = requests.get(url, timeout=30, verify=False)  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
-        response.raise_for_status()
-        
-        image = Image.open(io.BytesIO(response.content))
-        # print(f"图片下载成功: {image.size[0]}x{image.size[1]}")
-        return image
-    except Exception as e:
-        logger.error(f"Failed to download image: {str(e)}")
-        raise
+    logger.debug(f"Downloading from: {url}")
+    
+    # 构建代理配置：优先使用用户传入的 proxy，其次使用全局配置
+    user_proxy = proxy.strip() if proxy else None
+    active_proxy = user_proxy or PROXY_URL
+    proxies_dict = {"http": active_proxy, "https": active_proxy} if active_proxy else None
+    
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                print(f"   重试下载 ({attempt}/{max_retries})...", flush=True)
+                time.sleep(2)  # 重试前等待2秒
+            
+            # 使用 stream=True 分块下载，更好地处理大文件和超时
+            response = requests.get(
+                url, 
+                timeout=(10, 120),  # (连接超时, 读取超时) - 连接10秒，读取120秒
+                verify=False,  # 禁用 SSL 验证
+                stream=True,
+                proxies=proxies_dict  # 使用代理加速下载
+            )
+            response.raise_for_status()
+            
+            # 获取内容长度（如果有）
+            content_length = response.headers.get('content-length')
+            if content_length:
+                size_mb = int(content_length) / (1024 * 1024)
+                logger.debug(f"Image size: {size_mb:.2f} MB")
+            
+            # 读取全部内容
+            image_data = response.content
+            image = Image.open(io.BytesIO(image_data))
+            print(f"   图片下载成功: {image.size[0]}x{image.size[1]}")
+            return image
+            
+        except requests.exceptions.ConnectTimeout:
+            last_error = "连接超时，无法连接到图片服务器"
+            logger.warning(f"Connection timeout (attempt {attempt}/{max_retries})")
+        except requests.exceptions.ReadTimeout:
+            last_error = "读取超时，下载图片时间过长"
+            logger.warning(f"Read timeout (attempt {attempt}/{max_retries})")
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"网络连接错误: {str(e)}"
+            logger.warning(f"Connection error (attempt {attempt}/{max_retries}): {str(e)}")
+        except requests.exceptions.HTTPError as e:
+            # HTTP 错误（4xx, 5xx）不重试
+            status_code = e.response.status_code if e.response else "unknown"
+            logger.error(f"HTTP error {status_code}: {str(e)}")
+            raise Exception(f"下载图片失败 (HTTP {status_code}): 图片 URL 可能已过期或不可访问")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Download error (attempt {attempt}/{max_retries}): {str(e)}")
+    
+    # 所有重试都失败了
+    error_msg = (
+        f"❌ 图片下载失败\n\n"
+        f"💡 提示：\n"
+        f"   • 图片已在服务端生成成功\n"
+        f"   • 但下载图片时遇到网络问题\n"
+        f"   • 错误: {last_error}\n"
+        f"   • 建议检查网络连接后重试"
+    )
+    logger.error(f"Failed to download image after {max_retries} attempts: {last_error}")
+    raise Exception(error_msg)
 
 
 def pil_to_comfy_image(pil_image):
@@ -898,7 +1088,7 @@ def comfy_image_to_base64(image_tensor):
     return base64_string
 
 
-def process_api_response(response_data):
+def process_api_response(response_data, proxy=""):
     """
     Process API response and return PIL Image
     
@@ -908,6 +1098,7 @@ def process_api_response(response_data):
     
     Args:
         response_data (dict): API response data
+        proxy (str): 可选的代理地址，用于下载图片
         
     Returns:
         PIL.Image: Generated image
@@ -918,7 +1109,7 @@ def process_api_response(response_data):
             return response_data["_openai_pil_image"]
         
         # 原有逻辑：处理 Gemini 格式
-        return extract_image_from_gemini_response(response_data)
+        return extract_image_from_gemini_response(response_data, proxy=proxy)
     except Exception as e:
         logger.error(f"Failed to process API response: {str(e)}")
         raise
