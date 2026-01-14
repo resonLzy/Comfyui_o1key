@@ -14,6 +14,10 @@ import os
 import glob
 from pathlib import Path
 
+# 禁用 SSL 警告（Origin Certificate 是自签名证书，这是正常的）
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,7 +75,10 @@ MODEL_NAME_MAPPING = {
 
 # 新模型列表 (使用 OpenAI 格式 API)
 # 这些模型通过 New API 后台映射到实际的 Gemini 3 Pro Image Preview 模型
-OPENAI_FORMAT_MODELS = ["nano-banana-pro-default"]
+OPENAI_FORMAT_MODELS = [
+    "nano-banana-pro-default",
+    # 注意：gemini-3-pro-image-preview-url 系列使用 Gemini 原生格式，不在此列表中
+]
 
 # 宽高比 -> 1K 分辨率映射表 (来自 Gemini 3 Pro Image 官方文档)
 # 用于 OpenAI 格式 API 的 size 参数
@@ -120,7 +127,22 @@ def is_openai_format_model(model):
     Returns:
         bool: True 如果使用 OpenAI 格式
     """
-    return model in OPENAI_FORMAT_MODELS
+    # 直接匹配
+    if model in OPENAI_FORMAT_MODELS:
+        return True
+    
+    # 检查是否是以 -url 结尾的模型（如 gemini-3-pro-image-preview-2K-url）
+    # 这些是由 get_openai_model_and_size 动态生成的模型名
+    if model.endswith("-url"):
+        # 提取基础模型名（去掉可能的 -2K 或 -4K 后缀）
+        base_model = model
+        for suffix in ["-2K-url", "-4K-url"]:
+            if model.endswith(suffix):
+                base_model = model[:-len(suffix)] + "-url"
+                break
+        return base_model in OPENAI_FORMAT_MODELS
+    
+    return False
 
 
 def get_openai_model_and_size(model, aspect_ratio, image_size):
@@ -138,7 +160,23 @@ def get_openai_model_and_size(model, aspect_ratio, image_size):
     # 获取 1K 分辨率尺寸
     size = ASPECT_RATIO_TO_1K_SIZE.get(aspect_ratio, "1024x1024")
     
-    # 根据 image_size 选择对应的模型版本
+    # 处理以 -url 结尾的模型（如 gemini-3-pro-image-preview-url）
+    # 这类模型需要在 -url 前插入尺寸后缀
+    if model.endswith("-url"):
+        # 移除 -url 后缀
+        base_model = model[:-4]  # 去掉 "-url"
+        
+        # 根据 image_size 插入尺寸后缀
+        if image_size == "1K" or image_size is None:
+            # 1K 是默认的，直接使用原模型名
+            actual_model = model
+        else:
+            # 2K 或 4K，在 -url 前插入尺寸
+            actual_model = f"{base_model}-{image_size}-url"
+        
+        return actual_model, size
+    
+    # 原有逻辑：根据 image_size 选择对应的模型版本
     suffix = IMAGE_SIZE_TO_MODEL_SUFFIX.get(image_size, "-1K")
     actual_model = model + suffix
     
@@ -151,7 +189,6 @@ def call_openai_format_api(
     size,
     api_key,
     reference_images_base64=None,
-    max_retries=3,
     response_format="url"
 ):
     """
@@ -163,7 +200,6 @@ def call_openai_format_api(
         size (str): 图片尺寸 (如 "1376x768")
         api_key (str): API 密钥
         reference_images_base64 (list): 参考图的 base64 数据列表（图生图时使用，支持多张）
-        max_retries (int): 最大重试次数
         response_format (str): 返回格式 "url" 或 "b64_json"
         
     Returns:
@@ -172,22 +208,24 @@ def call_openai_format_api(
     if not api_key:
         raise ValueError("API key is required")
     
-    base_url = "https://o1key.com"
+    base_url = "https://api.o1key.com"
     
     # 根据是否有参考图选择接口
     if reference_images_base64 and len(reference_images_base64) > 0:
         # 图生图：使用 /v1/images/edits (multipart/form-data)
         endpoint = f"{base_url}/v1/images/edits"
-        return _call_openai_image_edit(endpoint, prompt, model, size, api_key, reference_images_base64, max_retries, response_format)
+        return _call_openai_image_edit(endpoint, prompt, model, size, api_key, reference_images_base64, response_format)
     else:
         # 文生图：使用 /v1/images/generations (JSON)
         endpoint = f"{base_url}/v1/images/generations"
-        return _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries, response_format)
+        return _call_openai_image_generation(endpoint, prompt, model, size, api_key, response_format)
 
 
-def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_retries, response_format="url"):
+def _call_openai_image_generation(endpoint, prompt, model, size, api_key, response_format="url"):
     """
     调用 OpenAI 格式的文生图 API (/v1/images/generations)
+    
+    注意：已禁用自动重试机制，避免因 504 等超时错误导致重复扣费
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -203,72 +241,78 @@ def _call_openai_image_generation(endpoint, prompt, model, size, api_key, max_re
     
     logger.debug(f"OpenAI API request: {endpoint}, model={model}, size={size}")
     
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                endpoint,
-                headers=headers,
-                json=body,
-                timeout=120
-            )
-            
-            if response.status_code == 200:
+    try:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json=body,
+            timeout=300,  # 增加超时时间到 5 分钟，给 4K 图片更多处理时间
+            verify=False  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
+        )
+        
+        if response.status_code == 200:
+            try:
                 response_json = response.json()
                 return _parse_openai_response(response_json)
+            except json.JSONDecodeError:
+                logger.warning("响应不是有效的 JSON 格式")
+                raise Exception("API 返回了非 JSON 格式的响应")
+        else:
+            error_text = response.text
+            friendly_error = parse_api_error(response.status_code, error_text)
+            logger.error(f"API 错误 (状态码 {response.status_code}): {error_text[:200]}")
+            
+            # 检测模型未配置的错误
+            if "model_not_found" in error_text or "无可用渠道" in error_text:
+                import re
+                group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                group_name = group_match.group(1) if group_match else "当前"
+                
+                friendly_msg = (
+                    f"❌ 模型未配置\n\n"
+                    f"模型「{model}」在「{group_name}」分组下没有可用渠道。\n\n"
+                    f"💡 解决方法：\n"
+                    f"   • 请在 New API 后台为该模型配置渠道映射\n"
+                    f"   • 或者联系管理员添加该模型的支持"
+                )
+                raise Exception(friendly_msg)
+            
+            # 客户端错误 (4xx)
+            if response.status_code == 401:
+                raise Exception("❌ API 密钥无效或已过期")
+            elif response.status_code == 429:
+                raise Exception("❌ 请求过于频繁，请稍后再试")
+            elif response.status_code == 504:
+                raise Exception(
+                    f"❌ {friendly_error}\n\n"
+                    f"💡 提示：\n"
+                    f"   • 504 超时可能是因为 4K 图片生成时间较长\n"
+                    f"   • 请求可能已在服务端处理中，请稍后检查是否已扣费\n"
+                    f"   • 建议先用 2K 测试效果，再生成 4K\n"
+                    f"   • 如需重试，请手动重新运行"
+                )
             else:
-                error_text = response.text
-                friendly_error = parse_api_error(response.status_code, error_text)
-                logger.error(f"API 错误 (状态码 {response.status_code})")
+                raise Exception(f"❌ {friendly_error}\n💡 建议稍后手动重试或降低图片清晰度")
                 
-                # 检测 API 分组不匹配的错误
-                if "model_not_found" in error_text and "无可用渠道" in error_text:
-                    import re
-                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
-                    group_name = group_match.group(1) if group_match else "default"
-                    
-                    friendly_msg = (
-                        f"❌ API Key 与模型不匹配\n\n"
-                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
-                        f"但您选择的模型「{model}」需要使用其他分组的 API Key。\n\n"
-                        f"💡 解决方法：\n"
-                        f"   • 请确认您的 API Key 分组与所选模型匹配\n"
-                        f"   • 或者更换为对应分组的 API Key"
-                    )
-                    raise Exception(friendly_msg)
-                
-                if 400 <= response.status_code < 500:
-                    if response.status_code == 401:
-                        raise Exception("❌ API 密钥无效或已过期")
-                    elif response.status_code == 429:
-                        raise Exception("❌ 请求过于频繁，请稍后再试")
-                    else:
-                        raise Exception(f"❌ {friendly_error}")
-                
-                # 5xx 服务器错误，重试
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"{friendly_error}")
-                    print(f"⏳ {wait_time}秒后自动重试...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
-                    
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Network error: {str(e)}")
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"⚠️ 网络错误，{wait_time}秒后重试...")
-                time.sleep(wait_time)
-            else:
-                raise Exception(f"❌ 网络错误: {str(e)}")
-    
-    raise Exception("已达最大重试次数，请求失败")
+    except requests.exceptions.Timeout:
+        raise Exception(
+            "❌ 请求超时\n\n"
+            "💡 提示：\n"
+            "   • 生成高清图片需要较长时间\n"
+            "   • 请求可能已在服务端处理中\n"
+            "   • 建议稍后检查是否已扣费，避免重复提交"
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error: {str(e)}")
+        raise Exception(f"❌ 网络错误: {str(e)}\n💡 请检查网络连接后手动重试")
 
 
-def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base64, max_retries, response_format="url"):
+def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base64, response_format="url"):
     """
     调用 OpenAI 格式的图生图 API (/v1/images/edits)
     使用 multipart/form-data 格式，支持多张参考图
+    
+    注意：已禁用自动重试机制，避免因 504 等超时错误导致重复扣费
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -290,67 +334,71 @@ def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base6
     
     logger.debug(f"OpenAI Edit API request: {endpoint}, model={model}, size={size}, images={len(images_base64)}")
     
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                endpoint,
-                headers=headers,
-                files=files,
-                data=data,
-                timeout=180
-            )
-            
-            if response.status_code == 200:
+    try:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=300,  # 增加超时时间到 5 分钟，给 4K 图片更多处理时间
+            verify=False  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
+        )
+        
+        if response.status_code == 200:
+            try:
                 response_json = response.json()
                 return _parse_openai_response(response_json)
+            except json.JSONDecodeError:
+                logger.warning("响应不是有效的 JSON 格式")
+                raise Exception("API 返回了非 JSON 格式的响应")
+        else:
+            error_text = response.text
+            friendly_error = parse_api_error(response.status_code, error_text)
+            logger.error(f"API 错误 (状态码 {response.status_code}): {error_text[:200]}")
+            
+            # 检测模型未配置的错误
+            if "model_not_found" in error_text or "无可用渠道" in error_text:
+                import re
+                group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                group_name = group_match.group(1) if group_match else "当前"
+                
+                friendly_msg = (
+                    f"❌ 模型未配置\n\n"
+                    f"模型「{model}」在「{group_name}」分组下没有可用渠道。\n\n"
+                    f"💡 解决方法：\n"
+                    f"   • 请在 New API 后台为该模型配置渠道映射\n"
+                    f"   • 或者联系管理员添加该模型的支持"
+                )
+                raise Exception(friendly_msg)
+            
+            # 客户端错误 (4xx)
+            if response.status_code == 401:
+                raise Exception("❌ API 密钥无效或已过期")
+            elif response.status_code == 429:
+                raise Exception("❌ 请求过于频繁，请稍后再试")
+            elif response.status_code == 504:
+                raise Exception(
+                    f"❌ {friendly_error}\n\n"
+                    f"💡 提示：\n"
+                    f"   • 504 超时可能是因为 4K 图片生成时间较长\n"
+                    f"   • 请求可能已在服务端处理中，请稍后检查是否已扣费\n"
+                    f"   • 建议先用 2K 测试效果，再生成 4K\n"
+                    f"   • 如需重试，请手动重新运行"
+                )
             else:
-                error_text = response.text
-                friendly_error = parse_api_error(response.status_code, error_text)
-                logger.error(f"API 错误 (状态码 {response.status_code})")
+                raise Exception(f"❌ {friendly_error}\n💡 建议稍后手动重试或降低图片清晰度")
                 
-                # 检测 API 分组不匹配的错误
-                if "model_not_found" in error_text and "无可用渠道" in error_text:
-                    import re
-                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
-                    group_name = group_match.group(1) if group_match else "default"
-                    
-                    friendly_msg = (
-                        f"❌ API Key 与模型不匹配\n\n"
-                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
-                        f"但您选择的模型「{model}」需要使用其他分组的 API Key。\n\n"
-                        f"💡 解决方法：\n"
-                        f"   • 请确认您的 API Key 分组与所选模型匹配\n"
-                        f"   • 或者更换为对应分组的 API Key"
-                    )
-                    raise Exception(friendly_msg)
-                
-                if 400 <= response.status_code < 500:
-                    if response.status_code == 401:
-                        raise Exception("❌ API 密钥无效或已过期")
-                    elif response.status_code == 429:
-                        raise Exception("❌ 请求过于频繁，请稍后再试")
-                    else:
-                        raise Exception(f"❌ {friendly_error}")
-                
-                # 5xx 服务器错误，重试
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"{friendly_error}")
-                    print(f"⏳ {wait_time}秒后自动重试...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
-                    
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Network error: {str(e)}")
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"⚠️ 网络错误，{wait_time}秒后重试...")
-                time.sleep(wait_time)
-            else:
-                raise Exception(f"❌ 网络错误: {str(e)}")
-    
-    raise Exception("已达最大重试次数，请求失败")
+    except requests.exceptions.Timeout:
+        raise Exception(
+            "❌ 请求超时\n\n"
+            "💡 提示：\n"
+            "   • 生成高清图片需要较长时间\n"
+            "   • 请求可能已在服务端处理中\n"
+            "   • 建议稍后检查是否已扣费，避免重复提交"
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error: {str(e)}")
+        raise Exception(f"❌ 网络错误: {str(e)}\n💡 请检查网络连接后手动重试")
 
 
 def _parse_openai_response(response_json):
@@ -387,11 +435,12 @@ def call_nano_banana_api(
     seed=None,
     api_key=None,
     reference_images_base64=None,  # 支持多个参考图（列表）
-    max_retries=3,
     response_format="url"
 ):
     """
     Call the Gemini Nano Banana API using official Gemini format
+    
+    注意：已禁用自动重试机制，避免因 504 等超时错误导致重复扣费
     
     Args:
         prompt (str): The text prompt for image generation
@@ -401,7 +450,6 @@ def call_nano_banana_api(
         seed (int): Random seed for reproducibility (optional)
         api_key (str): API key for authentication
         reference_images_base64 (list): List of base64 encoded reference images for image-to-image
-        max_retries (int): Maximum number of retry attempts
         response_format (str): Response format "url" or "b64_json"
         
     Returns:
@@ -424,7 +472,6 @@ def call_nano_banana_api(
             size=size,
             api_key=api_key,
             reference_images_base64=reference_images_base64,  # 支持多张参考图
-            max_retries=max_retries,
             response_format=response_format
         )
         
@@ -435,11 +482,25 @@ def call_nano_banana_api(
     # ========== 原有逻辑：Gemini 格式 API ==========
     # Convert user-friendly model name to official API name
     official_model = get_official_model_name(model)
+    
+    # 处理以 -url 结尾的模型（如 gemini-3-pro-image-preview-url）
+    # 根据 image_size 动态生成实际模型名
+    # 平台模型命名规则：
+    #   - 1K/默认: gemini-3-pro-image-preview-url (没有 1k)
+    #   - 2K: gemini-3-pro-image-preview-2k-url
+    #   - 4K: gemini-3-pro-image-preview-4k-url
+    if official_model.endswith("-url") and image_size:
+        if image_size in ["2K", "4K"]:
+            base_model = official_model[:-4]  # 去掉 "-url"
+            size_lower = image_size.lower()  # 2K -> 2k, 4K -> 4k
+            official_model = f"{base_model}-{size_lower}-url"
+        # 1K 时保持原名 gemini-3-pro-image-preview-url
+    
     logger.debug(f"Model mapping: {model} -> {official_model}")
     
     # Build the API endpoint (New API platform format)
     # New API will map model names and proxy to Google AI Studio
-    base_url = f"https://o1key.com/v1beta/models/{official_model}:generateContent"
+    base_url = f"https://api.o1key.com/v1beta/models/{official_model}:generateContent"
     
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -469,10 +530,10 @@ def call_nano_banana_api(
         "aspectRatio": aspect_ratio
     }
     
-    # Add imageSize only for nano-banana-pro-svip model
-    # Only this model supports image_size parameter (1K, 2K, 4K)
-    if image_size and model == "nano-banana-pro-svip":
-        image_config["imageSize"] = image_size
+    # 添加 imageSize 参数
+    # 根据平台 API 文档，imageSize 使用大写格式: 1K, 2K, 4K
+    if image_size:
+        image_config["imageSize"] = image_size.upper()
     
     generation_config = {
         "imageConfig": image_config
@@ -493,113 +554,81 @@ def call_nano_banana_api(
     logger.debug(f"Request body structure: {list(body.keys())}")
     logger.debug(f"imageConfig: {image_config}")
     
-    #     # === DEBUG: Print full request body ===
-    #     import json
-    #     print("\n" + "="*80)
-    #     print("🔍 调试信息 - 完整 API 请求体")
-    #     print("="*80)
-    #     print(f"显示模型名: {model}")
-    #     print(f"官方模型名: {official_model}")
-    #     print(f"API 端点: {base_url}")
-    #     print("\n请求体 JSON:")
-    #     print(json.dumps(body, indent=2, ensure_ascii=False))
-    #     print("="*80 + "\n")
-    #     
-    # Retry logic with exponential backoff
-    for attempt in range(max_retries):
-        try:
-            # 调试日志
-            mode = "图生图" if reference_images_base64 else "文生图"
-            num_refs = len(reference_images_base64) if reference_images_base64 else 0
-            logger.debug(f"正在生成图片... ({mode}, 参考图{num_refs}张, 尝试 {attempt + 1}/{max_retries})")
-            logger.debug(f"Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}, Seed: {seed}")
-            logger.debug(f"Prompt: {prompt[:100]}...")
-            
-            response = requests.post(
-                base_url,
-                headers=headers,
-                json=body,
-                timeout=120  # Increased timeout for image generation
-            )
-            
-            # Check if request was successful
-            logger.debug(f"API 响应已接收，状态码: {response.status_code}")
-            if response.status_code == 200:
-                logger.debug("API 调用成功")
+    # 单次请求，不自动重试（避免 504 等超时错误导致重复扣费）
+    try:
+        # 调试日志
+        mode = "图生图" if reference_images_base64 else "文生图"
+        num_refs = len(reference_images_base64) if reference_images_base64 else 0
+        logger.debug(f"正在生成图片... ({mode}, 参考图{num_refs}张)")
+        logger.debug(f"Model: {model}, Aspect: {aspect_ratio}, Size: {image_size}, Seed: {seed}")
+        logger.debug(f"Prompt: {prompt[:100]}...")
+        
+        response = requests.post(
+            base_url,
+            headers=headers,
+            json=body,
+            timeout=300,  # 增加超时时间到 5 分钟，给 4K 图片更多处理时间
+            verify=False  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
+        )
+        
+        # Check if request was successful
+        if response.status_code == 200:
+            try:
                 response_json = response.json()
-                
-    #                 # === DEBUG: Print response structure ===
-    #                 print("\n" + "="*80)
-    #                 print("🔍 调试信息 - API 响应结构")
-    #                 print("="*80)
-    #                 print(f"响应键: {list(response_json.keys())}")
-    #                 if 'candidates' in response_json and len(response_json['candidates']) > 0:
-    #                     candidate = response_json['candidates'][0]
-    #                     print(f"候选项键: {list(candidate.keys())}")
-    #                     if 'content' in candidate:
-    #                         print(f"内容键: {list(candidate['content'].keys())}")
-    #                         if 'parts' in candidate['content']:
-    #                             parts = candidate['content']['parts']
-    #                             print(f"Parts 数量: {len(parts)}")
-    #                             for i, part in enumerate(parts):
-    #                                 print(f"Part {i} 键: {list(part.keys())}")
-    #                                 if 'text' in part:
-    #                                     print(f"Part {i} text: {part['text'][:200]}")
-    #                 print("="*80 + "\n")
-    #                 
                 return response_json
-            else:
-                # 解析错误响应，检测特定错误类型
-                error_text = response.text
-                friendly_error = parse_api_error(response.status_code, error_text)
-                logger.error(f"API error: {response.status_code}")
-                
-                # 检测 API 分组不匹配的错误（用户使用了错误的 API Key）
-                if "model_not_found" in error_text and "无可用渠道" in error_text:
-                    # 提取分组名称用于提示
-                    import re
-                    group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
-                    group_name = group_match.group(1) if group_match else "default"
-                    
-                    friendly_msg = (
-                        f"❌ API Key 与模型不匹配\n\n"
-                        f"您当前使用的 API Key 属于「{group_name}」分组，\n"
-                        f"但您选择的模型「{model}」需要使用「svip」分组的 API Key。\n\n"
-                        f"💡 解决方法：\n"
-                        f"   • 如果您要使用 svip 模型，请更换为 svip 专用的 API Key\n"
-                        f"   • 如果您只有 default 分组的 Key，请将模型改为「nano-banana-pro-default」"
-                    )
-                    raise Exception(friendly_msg)
-                
-                # Don't retry for client errors (4xx)
-                if 400 <= response.status_code < 500:
-                    if response.status_code == 401:
-                        raise Exception("❌ API 密钥无效或已过期，请检查您的密钥")
-                    elif response.status_code == 429:
-                        raise Exception("❌ 请求过于频繁，请稍后再试")
-                    else:
-                        raise Exception(f"❌ {friendly_error}")
-                
-                # Retry for server errors (5xx)
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"{friendly_error}")
-                    print(f"⏳ {wait_time}秒后自动重试...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"❌ {friendly_error}\n💡 建议稍后重试或降低图片清晰度")
-                    
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Network error: {str(e)}")
+            except json.JSONDecodeError:
+                logger.warning("响应不是有效的 JSON 格式")
+                raise Exception("API 返回了非 JSON 格式的响应")
+        else:
+            # 解析错误响应，检测特定错误类型
+            error_text = response.text
+            friendly_error = parse_api_error(response.status_code, error_text)
+            logger.error(f"API error: {response.status_code}")
             
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"网络错误，{wait_time}秒后重试...")
-                time.sleep(wait_time)
+            # 检测模型未配置的错误
+            if "model_not_found" in error_text or "无可用渠道" in error_text:
+                # 提取分组名称用于提示
+                import re
+                group_match = re.search(r'分组\s*(\w+)\s*下', error_text)
+                group_name = group_match.group(1) if group_match else "当前"
+                
+                friendly_msg = (
+                    f"❌ 模型未配置\n\n"
+                    f"模型「{model}」在「{group_name}」分组下没有可用渠道。\n\n"
+                    f"💡 解决方法：\n"
+                    f"   • 请在 New API 后台为该模型配置渠道映射\n"
+                    f"   • 或者联系管理员添加该模型的支持"
+                )
+                raise Exception(friendly_msg)
+            
+            # 客户端错误 (4xx)
+            if response.status_code == 401:
+                raise Exception("❌ API 密钥无效或已过期，请检查您的密钥")
+            elif response.status_code == 429:
+                raise Exception("❌ 请求过于频繁，请稍后再试")
+            elif response.status_code == 504:
+                raise Exception(
+                    f"❌ {friendly_error}\n\n"
+                    f"💡 提示：\n"
+                    f"   • 504 超时可能是因为 4K 图片生成时间较长\n"
+                    f"   • 请求可能已在服务端处理中，请稍后检查是否已扣费\n"
+                    f"   • 建议先用 2K 测试效果，再生成 4K\n"
+                    f"   • 如需重试，请手动重新运行"
+                )
             else:
-                raise Exception(f"网络错误: {str(e)}")
-    
-    raise Exception("已达最大重试次数，请求失败")
+                raise Exception(f"❌ {friendly_error}\n💡 建议稍后手动重试或降低图片清晰度")
+                
+    except requests.exceptions.Timeout:
+        raise Exception(
+            "❌ 请求超时\n\n"
+            "💡 提示：\n"
+            "   • 生成高清图片需要较长时间\n"
+            "   • 请求可能已在服务端处理中\n"
+            "   • 建议稍后检查是否已扣费，避免重复提交"
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error: {str(e)}")
+        raise Exception(f"❌ 网络错误: {str(e)}\n💡 请检查网络连接后手动重试")
 
 
 def extract_image_from_gemini_response(response_data):
@@ -641,19 +670,8 @@ def extract_image_from_gemini_response(response_data):
     try:
         # Navigate the response structure
         if 'candidates' not in response_data or len(response_data['candidates']) == 0:
-            # 打印调试信息帮助诊断
-            import json
-            print("\n" + "="*60)
-            print("❌ API 响应结构异常 - 调试信息")
-            print("="*60)
-            print(f"响应键: {list(response_data.keys())}")
-            # 限制输出长度，避免刷屏
-            response_str = json.dumps(response_data, indent=2, ensure_ascii=False)
-            if len(response_str) > 1000:
-                response_str = response_str[:1000] + "\n... (输出已截断)"
-            print(response_str)
-            print("="*60 + "\n")
-            raise Exception("No candidates in API response")
+            logger.error(f"API 响应结构异常: 缺少 candidates")
+            raise Exception("API 响应中缺少候选项数据")
         
         candidate = response_data['candidates'][0]
         
@@ -667,16 +685,9 @@ def extract_image_from_gemini_response(response_data):
         # 处理 MALFORMED_FUNCTION_CALL 错误
         if finish_reason == 'MALFORMED_FUNCTION_CALL':
             finish_message = candidate.get('finishMessage', '')
-            import json
-            print("\n" + "="*60)
-            print("❌ API 模型调用异常")
-            print("="*60)
-            print(f"错误类型: {finish_reason}")
+            logger.error(f"API 模型调用异常: {finish_reason}")
             if finish_message:
-                # 截取关键信息
-                short_msg = finish_message[:300] if len(finish_message) > 300 else finish_message
-                print(f"错误详情: {short_msg}")
-            print("="*60 + "\n")
+                logger.error(f"错误详情: {finish_message[:200]}")
             raise Exception(
                 "API 后端模型调用异常 (MALFORMED_FUNCTION_CALL)\n"
                 "💡 建议：\n"
@@ -686,16 +697,7 @@ def extract_image_from_gemini_response(response_data):
         
         # 处理其他非正常结束原因
         if finish_reason and finish_reason not in ['STOP', 'MAX_TOKENS', '']:
-            import json
-            print("\n" + "="*60)
-            print(f"⚠️ API 响应异常终止: {finish_reason}")
-            print("="*60)
-            candidate_str = json.dumps(candidate, indent=2, ensure_ascii=False)
-            if len(candidate_str) > 500:
-                candidate_str = candidate_str[:500] + "\n... (输出已截断)"
-            print(candidate_str)
-            print("="*60 + "\n")
-            
+            logger.warning(f"API 响应异常终止: {finish_reason}")
             # 根据不同原因给出提示
             reason_messages = {
                 'SAFETY': "内容被安全过滤器拦截，请修改提示词",
@@ -710,17 +712,7 @@ def extract_image_from_gemini_response(response_data):
             content = candidate.get('content', {})
             is_empty_content = (content == {} or content is None)
             
-            # 打印调试信息帮助诊断
-            import json
-            print("\n" + "="*60)
-            print("❌ API 响应结构异常 - 调试信息")
-            print("="*60)
-            print(f"候选项键: {list(candidate.keys())}")
-            candidate_str = json.dumps(candidate, indent=2, ensure_ascii=False)
-            if len(candidate_str) > 1000:
-                candidate_str = candidate_str[:1000] + "\n... (输出已截断)"
-            print(candidate_str)
-            print("="*60 + "\n")
+            logger.error(f"API 响应结构异常: 缺少 content 或 parts")
             
             if is_empty_content:
                 raise Exception(
@@ -729,7 +721,7 @@ def extract_image_from_gemini_response(response_data):
                     "   • 这通常是 API 服务端的临时问题\n"
                     "   • 请稍后重试，或尝试更换模型"
                 )
-            raise Exception("Invalid response structure: missing content or parts")
+            raise Exception("API 响应结构异常: 缺少 content 或 parts")
         
         parts = candidate['content']['parts']
         
@@ -776,20 +768,7 @@ def extract_image_from_gemini_response(response_data):
                     return download_image_from_url(url)
         
         # If we get here, no image data was found
-        # 打印调试信息帮助诊断
-        import json
-        print("\n" + "="*60)
-        print("❌ API 返回中未找到图片数据")
-        print("="*60)
-        print(f"Parts 数量: {len(parts)}")
-        for idx, part in enumerate(parts):
-            print(f"Part {idx} 键: {list(part.keys())}")
-            # 如果有 text，打印部分内容
-            if 'text' in part:
-                text_preview = part['text'][:200] if len(part['text']) > 200 else part['text']
-                print(f"Part {idx} text: {text_preview}")
-        print("="*60 + "\n")
-        
+        logger.error(f"API 返回中未找到图片数据，Parts 数量: {len(parts)}")
         raise Exception(
             "API 返回中未找到图片数据\n"
             "💡 建议：\n"
@@ -859,7 +838,7 @@ def download_image_from_url(url):
     """
     try:
         logger.debug(f"Downloading from: {url}")
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=30, verify=False)  # 禁用 SSL 验证（Origin Certificate 是自签名证书）
         response.raise_for_status()
         
         image = Image.open(io.BytesIO(response.content))
