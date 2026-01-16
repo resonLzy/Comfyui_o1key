@@ -14,7 +14,10 @@ try:
         comfy_image_to_base64,
         load_images_from_folder,
         save_image_to_folder,
-        format_time
+        format_time,
+        resize_image_to_max_dim,
+        UPSCALE_METHODS,
+        MAX_DIM_OPTIONS
     )
 except ImportError:
     from utils import (
@@ -24,7 +27,10 @@ except ImportError:
         comfy_image_to_base64,
         load_images_from_folder,
         save_image_to_folder,
-        format_time
+        format_time,
+        resize_image_to_max_dim,
+        UPSCALE_METHODS,
+        MAX_DIM_OPTIONS
     )
 
 logger = logging.getLogger(__name__)
@@ -44,69 +50,64 @@ class NanoBananaBatchProcessor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {
+                "提示词": ("STRING", {
                     "multiline": True,
                     "default": "enhance this image\n每行一个提示词，支持多批次处理"
                 }),
-                "model": ([
-                    "nano-banana-pro-default",
+                "模型": ([
                     "gemini-3-pro-image-preview-url",
-                    "gemini-3-pro-image-preview-2k-url",
-                    "gemini-3-pro-image-preview-4k-url",
-                    "gemini-3-pro-image-preview",
-                    "gemini-3-pro-image-preview-2k",
-                    "gemini-3-pro-image-preview-4k",
                 ], {
-                    "default": "nano-banana-pro-default"
+                    "default": "gemini-3-pro-image-preview-url"
                 }),
-                "aspect_ratio": ([
+                "宽高比": ([
                     "1:1", "4:3", "3:4", "16:9", "9:16", 
                     "2:3", "3:2", "4:5", "5:4", "21:9"
                 ], {
                     "default": "1:1"
                 }),
-                "image_size": (["1K", "2K", "4K"], {
+                "分辨率": (["1K", "2K", "4K"], {
                     "default": "2K"
                 }),
-                "response_format": (["url", "b64_json"], {
-                    "default": "url"
+                "缩放方法": (list(UPSCALE_METHODS.keys()), {
+                    "default": "lanczos"
                 }),
-                "folder_path": ("STRING", {
+                "最大尺寸": (MAX_DIM_OPTIONS, {
+                    "default": "auto"
+                }),
+                "输入文件夹": ("STRING", {
                     "default": "",
                     "multiline": False
                 }),
-                "file_pattern": ("STRING", {
+                "文件匹配": ("STRING", {
                     "default": "*.png,*.jpg,*.jpeg",
                     "multiline": False
                 }),
-                "output_folder": ("STRING", {
+                "输出文件夹": ("STRING", {
                     "default": "",
                     "multiline": False
                 }),
             },
             "optional": {
-                "seed": ("INT", {
+                # 参考图
+                "参考图_1": ("IMAGE",),
+                "参考图_2": ("IMAGE",),
+                "参考图_3": ("IMAGE",),
+                "参考图_4": ("IMAGE",),
+                "参考图_5": ("IMAGE",),
+                "参考图_6": ("IMAGE",),
+                "参考图_7": ("IMAGE",),
+                "参考图_8": ("IMAGE",),
+                "参考图_9": ("IMAGE",),
+                "种子": ("INT", {
                     "default": -1,
                     "min": -1,
                     "max": 2147483647,
                     "display": "number"
                 }),
-                # 参考图
-                "image_1": ("IMAGE",),
-                "image_2": ("IMAGE",),
-                "image_3": ("IMAGE",),
-                "image_4": ("IMAGE",),
-                "image_5": ("IMAGE",),
-                "image_6": ("IMAGE",),
-                "api_key": ("STRING", {
-                    "multiline": False,
-                    "default": ""
+                "生成后控制": (["randomize", "fixed", "increment", "decrement"], {
+                    "default": "randomize"
                 }),
-                "proxy": ("STRING", {
-                    "multiline": False,
-                    "default": "",
-                    "placeholder": "http://127.0.0.1:7890"
-                }),
+                "api_config": ("APICONFIG",),
             }
         }
     
@@ -115,18 +116,50 @@ class NanoBananaBatchProcessor:
     FUNCTION = "process_batch"
     CATEGORY = "o1key/batch"
     
-    def process_batch(self, prompt, model, aspect_ratio, image_size, 
-                     response_format, folder_path, file_pattern, output_folder,
-                     seed=-1,
-                     image_1=None, image_2=None, image_3=None, 
-                     image_4=None, image_5=None, image_6=None,
-                     api_key="", proxy=""):
+    def process_batch(self, 提示词, 模型, 宽高比, 分辨率, 缩放方法, 最大尺寸,
+                     输入文件夹, 文件匹配, 输出文件夹,
+                     参考图_1=None, 参考图_2=None, 参考图_3=None, 
+                     参考图_4=None, 参考图_5=None, 参考图_6=None,
+                     参考图_7=None, 参考图_8=None, 参考图_9=None,
+                     种子=-1, 生成后控制="randomize", api_config=None):
         """
         批量处理文件夹中的图片，支持多提示词
+        
+        Args:
+            缩放方法: 缩放方法 (lanczos, bilinear, bicubic 等)
+            最大尺寸: 最大尺寸，"auto" 表示不缩放
         """
+        # 参数映射（方便内部使用英文变量名）
+        prompt = 提示词
+        model = 模型
+        aspect_ratio = 宽高比
+        image_size = 分辨率
+        upscale_method = 缩放方法
+        max_dim = 最大尺寸
+        folder_path = 输入文件夹
+        file_pattern = 文件匹配
+        output_folder = 输出文件夹
+        image_1 = 参考图_1
+        image_2 = 参考图_2
+        image_3 = 参考图_3
+        image_4 = 参考图_4
+        image_5 = 参考图_5
+        image_6 = 参考图_6
+        image_7 = 参考图_7
+        image_8 = 参考图_8
+        image_9 = 参考图_9
+        seed = 种子
+        control_after_generation = 生成后控制  # 保留参数以保持兼容性
+        
         try:
             import random
             import torch
+            
+            # 从配置节点获取配置信息
+            if api_config and isinstance(api_config, (tuple, list)) and len(api_config) >= 3:
+                final_api_key, final_network_url, final_proxy = api_config[0], api_config[1], api_config[2]
+            else:
+                raise ValueError("请连接API配置节点，提供API密钥、网络线路和代理设置")
             
             # 解析提示词（每行一个）
             prompts = [p.strip() for p in prompt.split('\n') if p.strip()]
@@ -138,7 +171,7 @@ class NanoBananaBatchProcessor:
             
             # 收集固定参考图
             fixed_refs = []
-            for img in [image_1, image_2, image_3, image_4, image_5, image_6]:
+            for img in [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9]:
                 if img is not None:
                     fixed_refs.append(img)
             
@@ -169,10 +202,11 @@ class NanoBananaBatchProcessor:
                 print(f"   {idx}. {p[:50]}{'...' if len(p) > 50 else ''}")
             print(f"🤖 模型      {model}")
             print(f"📐 宽高比    {aspect_ratio}")
-            print(f"🖼️  清晰度    {image_size}")
-            print(f"📦 返回格式  {response_format}")
+            print(f"🖼️  分辨率    {image_size}")
             if num_fixed_refs > 0:
-                print(f"🖼️  固定参考  {num_fixed_refs} 张")
+                print(f"🖼️  参考图    {num_fixed_refs} 张")
+            if max_dim != "auto":
+                print(f"📐 缩放      最大 {max_dim}px ({upscale_method})")
             print(f"{'='*60}")
             print(f"📊 任务: {total_images}张 × {total_prompts}提示词 = {total_generations}个")
             print(f"{'='*60}\n")
@@ -219,14 +253,23 @@ class NanoBananaBatchProcessor:
                             aspect_ratio=aspect_ratio,
                             image_size=image_size,
                             seed=seed_param,
-                            api_key=api_key,
+                            api_key=final_api_key,
                             reference_images_base64=ref_base64_list,
-                            response_format=response_format,
-                            proxy=proxy
+                            response_format=None,  # 后端自动适配
+                            proxy=final_proxy,
+                            network_url=final_network_url
                         )
                         
                         # 处理响应
-                        result_pil = process_api_response(response_data, proxy=proxy)
+                        result_pil = process_api_response(response_data, proxy=final_proxy)
+                        
+                        # 应用缩放（如果不是 auto）
+                        if max_dim != "auto":
+                            original_size = result_pil.size
+                            result_pil = resize_image_to_max_dim(result_pil, max_dim, upscale_method)
+                            if result_pil.size != original_size:
+                                print(f"   📐 缩放: {original_size[0]}x{original_size[1]} -> {result_pil.size[0]}x{result_pil.size[1]}")
+                        
                         result_comfy = pil_to_comfy_image(result_pil)
                         all_processed_images.append(result_comfy)
                         
