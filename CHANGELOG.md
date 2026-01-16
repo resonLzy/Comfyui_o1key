@@ -5,6 +5,33 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-01-XX
+
+### 新增
+- **敏感信息清理功能**：新增 `sanitize_error_message()` 函数，自动清理错误消息中的敏感信息
+  - 自动隐藏所有 HTTP/HTTPS URL 地址
+  - 自动隐藏平台相关词汇（NEW API、o1key.com、aabao.top 等）
+  - 自动隐藏上游接口相关词汇（upstream、origin 等）
+  - 自动隐藏其他敏感平台信息（Google AI Studio、Gemini API 等）
+
+### 改进
+- **安全性增强**：
+  - 所有错误消息输出前都会自动清理敏感信息
+  - 所有日志输出中的敏感信息都会被清理
+  - 所有用户界面错误提示中的敏感信息都会被清理
+  - 确保不会在日志和错误弹框中暴露上游接口地址和平台相关信息
+- **错误处理优化**：
+  - `parse_api_error()` 函数现在会自动清理错误文本中的敏感信息
+  - 所有节点的错误处理都统一使用敏感信息清理功能
+  - 所有 logger.error() 调用都会清理敏感信息
+
+### 技术细节
+- `utils.py`: 新增 `sanitize_error_message()` 函数，使用正则表达式匹配和替换敏感信息
+- `nodes/text_to_image.py`: 所有错误输出都经过敏感信息清理
+- `nodes/image_to_image.py`: 所有错误输出都经过敏感信息清理
+- `nodes/batch_processor.py`: 所有错误输出都经过敏感信息清理
+- 共在 17 个关键位置添加了敏感信息清理功能
+
 ## [1.3.0] - 2026-01-XX
 
 ### 新增

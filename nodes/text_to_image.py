@@ -14,7 +14,8 @@ try:
         pil_to_comfy_image,
         resize_image_to_max_dim,
         UPSCALE_METHODS,
-        MAX_DIM_OPTIONS
+        MAX_DIM_OPTIONS,
+        sanitize_error_message
     )
 except ImportError:
     from utils import (
@@ -23,7 +24,8 @@ except ImportError:
         pil_to_comfy_image,
         resize_image_to_max_dim,
         UPSCALE_METHODS,
-        MAX_DIM_OPTIONS
+        MAX_DIM_OPTIONS,
+        sanitize_error_message
     )
 
 logger = logging.getLogger(__name__)
@@ -249,15 +251,17 @@ class NanoBananaTextToImage:
                             print(f"   ✅ 图片 {batch_idx} 生成成功")
                         else:
                             failed_count += 1
-                            errors.append(f"图片 {batch_idx}: {error_msg}")
-                            print(f"   ❌ 图片 {batch_idx} 生成失败: {error_msg[:50]}...")
+                            sanitized_error = sanitize_error_message(error_msg)
+                            errors.append(f"图片 {batch_idx}: {sanitized_error}")
+                            print(f"   ❌ 图片 {batch_idx} 生成失败: {sanitized_error[:50]}...")
                 
                 total_time = time.time() - _t_start
                 
                 # 检查是否全部失败
                 if success_count == 0:
                     error_detail = "\n".join(errors[:3])  # 只显示前3个错误
-                    raise Exception(f"所有图片生成失败:\n{error_detail}")
+                    sanitized_detail = sanitize_error_message(error_detail)
+                    raise Exception(f"所有图片生成失败:\n{sanitized_detail}")
                 
                 # 按批次索引排序，确保顺序一致
                 all_images.sort(key=lambda x: x[0])
@@ -278,6 +282,7 @@ class NanoBananaTextToImage:
             
         except Exception as e:
             error_msg = f"文生图失败: {str(e)}"
-            print(f"\n{error_msg}\n")
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            sanitized_msg = sanitize_error_message(error_msg)
+            print(f"\n{sanitized_msg}\n")
+            logger.error(sanitized_msg)
+            raise Exception(sanitized_msg)

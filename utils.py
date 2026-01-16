@@ -45,6 +45,46 @@ PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 # ============================================================
 
 
+def sanitize_error_message(error_text):
+    """
+    清理错误消息中的敏感信息，隐藏上游接口地址和平台相关信息
+    
+    Args:
+        error_text (str): 原始错误文本
+        
+    Returns:
+        str: 清理后的错误文本
+    """
+    if not error_text:
+        return error_text
+    
+    import re
+    
+    # 需要隐藏的敏感词汇和模式
+    sensitive_patterns = [
+        # API URL地址
+        (r'https?://[^\s\)]+', '[API地址已隐藏]'),
+        # 平台相关词汇
+        (r'(?i)new\s+api', '[平台信息已隐藏]'),
+        (r'(?i)o1key\.com', '[平台信息已隐藏]'),
+        (r'(?i)aabao\.top', '[平台信息已隐藏]'),
+        (r'(?i)api\.o1key', '[平台信息已隐藏]'),
+        (r'(?i)api\.aabao', '[平台信息已隐藏]'),
+        # 上游接口相关
+        (r'(?i)upstream', '[上游接口信息已隐藏]'),
+        (r'(?i)origin', '[源站信息已隐藏]'),
+        # 其他可能的敏感信息
+        (r'(?i)google\s+ai\s+studio', '[平台信息已隐藏]'),
+        (r'(?i)gemini\s+api', '[平台信息已隐藏]'),
+    ]
+    
+    sanitized = error_text
+    for pattern, replacement in sensitive_patterns:
+        sanitized = re.sub(pattern, replacement, sanitized)
+    
+    return sanitized
+
+
 def parse_api_error(status_code, error_text):
     """
     解析 API 错误，返回用户友好的错误消息
@@ -72,20 +112,23 @@ def parse_api_error(status_code, error_text):
         524: "发生超时",
     }
     
+    # 清理敏感信息
+    sanitized_error = sanitize_error_message(error_text)
+    
     if status_code in error_messages:
         base_msg = error_messages[status_code]
         if is_html:
             return f"⚠️ {base_msg} (错误码: {status_code})"
         else:
-            # 如果不是 HTML，可以显示部分错误信息
-            short_error = error_text[:100] if len(error_text) > 100 else error_text
+            # 如果不是 HTML，可以显示部分错误信息（已清理敏感信息）
+            short_error = sanitized_error[:100] if len(sanitized_error) > 100 else sanitized_error
             return f"⚠️ {base_msg}\n   详情: {short_error}"
     
     # 其他错误
     if is_html:
         return f"⚠️ 服务器错误 (错误码: {status_code})"
     else:
-        short_error = error_text[:200] if len(error_text) > 200 else error_text
+        short_error = sanitized_error[:200] if len(sanitized_error) > 200 else sanitized_error
         return f"⚠️ API 错误 (状态码 {status_code}): {short_error}"
 
 
@@ -415,7 +458,8 @@ def _call_openai_image_generation(endpoint, prompt, model, size, api_key, respon
             "   • 建议稍后重试，避免重复提交"
         )
     except requests.exceptions.RequestException as e:
-        logger.error(f"Network error: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Network error: {sanitized_error}")
         raise Exception(f"❌ 网络连接失败\n💡 请检查网络连接后重试")
 
 
@@ -548,7 +592,8 @@ def _call_openai_image_edit(endpoint, prompt, model, size, api_key, images_base6
             "   • 建议稍后重试，避免重复提交"
         )
     except requests.exceptions.RequestException as e:
-        logger.error(f"Network error: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Network error: {sanitized_error}")
         raise Exception(f"❌ 网络连接失败\n💡 请检查网络连接后重试")
 
 
@@ -582,7 +627,8 @@ def _parse_openai_response(response_json):
         raise Exception(f"无法解析图片数据，可用字段: {available_keys}")
         
     except Exception as e:
-        logger.error(f"Failed to parse OpenAI response: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Failed to parse OpenAI response: {sanitized_error}")
         raise
 
 
@@ -877,7 +923,8 @@ def call_nano_banana_api(
         )
     except requests.exceptions.RequestException as e:
         print(f"❌ 网络连接失败")
-        logger.error(f"Network error: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Network error: {sanitized_error}")
         raise Exception(f"❌ 网络连接失败\n💡 请检查网络连接后重试")
 
 
@@ -1052,7 +1099,8 @@ def extract_image_from_gemini_response(response_data, proxy=""):
         )
         
     except Exception as e:
-        logger.error(f"Failed to extract image from response: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Failed to extract image from response: {sanitized_error}")
         raise
 
 
@@ -1365,7 +1413,8 @@ def process_api_response(response_data, proxy=""):
         # 原有逻辑：处理 Gemini 格式
         return extract_image_from_gemini_response(response_data, proxy=proxy)
     except Exception as e:
-        logger.error(f"Failed to process API response: {str(e)}")
+        sanitized_error = sanitize_error_message(str(e))
+        logger.error(f"Failed to process API response: {sanitized_error}")
         raise
 
 

@@ -17,7 +17,8 @@ try:
         format_time,
         resize_image_to_max_dim,
         UPSCALE_METHODS,
-        MAX_DIM_OPTIONS
+        MAX_DIM_OPTIONS,
+        sanitize_error_message
     )
 except ImportError:
     from utils import (
@@ -30,7 +31,8 @@ except ImportError:
         format_time,
         resize_image_to_max_dim,
         UPSCALE_METHODS,
-        MAX_DIM_OPTIONS
+        MAX_DIM_OPTIONS,
+        sanitize_error_message
     )
 
 logger = logging.getLogger(__name__)
@@ -288,15 +290,16 @@ class NanoBananaBatchProcessor:
                         error_str = str(e)
                         failed_count += 1
                         
-                        # 显示错误信息
-                        short_error = error_str[:100] if len(error_str) > 100 else error_str
+                        # 清理敏感信息后显示错误信息
+                        sanitized_error = sanitize_error_message(error_str)
+                        short_error = sanitized_error[:100] if len(sanitized_error) > 100 else sanitized_error
                         print(f"   ❌ 失败: {short_error}")
                         
                         # 检测服务器过载，提醒用户
                         if "429" in error_str or "503" in error_str or "502" in error_str or "频繁" in error_str:
                             print(f"   ⚠️ 服务器压力较大，API 内置重试机制会自动处理")
                         
-                        logger.error(f"处理失败 {filename}: {error_str}")
+                        logger.error(f"处理失败 {filename}: {sanitized_error}")
                     
                     pbar.update(1)
             
@@ -327,6 +330,7 @@ class NanoBananaBatchProcessor:
             
         except Exception as e:
             error_msg = f"批量处理失败: {str(e)}"
-            print(f"\n❌ {error_msg}\n")
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            sanitized_msg = sanitize_error_message(error_msg)
+            print(f"\n❌ {sanitized_msg}\n")
+            logger.error(sanitized_msg)
+            raise Exception(sanitized_msg)
