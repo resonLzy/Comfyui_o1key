@@ -65,7 +65,7 @@ class NanoBananaAPIConfig:
             network_url = None
             network = "不加速"
         
-        logger.debug(f"配置加载完成")
+        logger.debug(f"API配置 - 网络: {network}, 代理: {proxy or '未使用'}")
         
-        # 返回配置元组
+        # 返回配置元组，作为配置对象（包含network名称用于显示）
         return ((api_key, network_url, proxy, network),)
